@@ -69,7 +69,7 @@ Follow the **Kick Start guide** below to get started.
 
 #### Prerequisites
 
-- **Claude Desktop** with a Pro subscription (free tier context is too small) — download from [claude.ai/download](https://claude.ai/download)
+- **Claude Desktop** — download from [claude.ai/download](https://claude.ai/download) (free tier may work but Pro is recommended if you hit context limits)
 - **Node.js 18+** — download from [nodejs.org](https://nodejs.org)
 - **Google Chrome** — the editor extension only runs in Chrome
 - A free **PlayCanvas account** — sign up at [playcanvas.com](https://playcanvas.com)
@@ -156,7 +156,7 @@ Try prompts like:
 #### Limitations
 
 - Only **one PlayCanvas Editor instance** can be connected at a time
-- **Claude Pro subscription** strongly recommended for sufficient context
+- Free tier may work but **Claude Pro** is recommended if you run into context length issues
 - Works with **Claude Desktop only** — not the claude.ai web interface
 - Chrome extension requires **Google Chrome**
 
