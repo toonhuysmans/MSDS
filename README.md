@@ -46,7 +46,63 @@ A collection of WebXR experiments for Meta Quest 2 & 3, exploring proprioception
 
 ---
 
-## WebXR Development Kick Start
+## Three Routes to VR Proprioception Experiments
+
+There are three ways to build VR experiments for this project, ranging from easiest to most advanced. Pick the one that matches your skill level and goals.
+
+### Route 1: Single HTML + Claude Code (easiest)
+
+**Best for:** Quick prototyping, no prior VR experience needed, zero setup friction.
+
+This is how every experiment in this repo was built. You write nothing — you describe what you want and Claude Code generates single self-contained HTML files using WebXR and Three.js. No installs, no project files, no build steps. Deploy via GitHub Pages and open on your Quest browser.
+
+**Pros:** Fastest from idea to working VR prototype. Everything is one file. Easy to share.
+**Cons:** Limited to what WebXR + Three.js can do. No visual scene editor. Text-based workflow.
+
+Follow the **Kick Start guide** below to get started.
+
+### Route 2: PlayCanvas + Claude Desktop (recommended for designers)
+
+**Best for:** Designers and visual thinkers who want a 3D editor with drag-and-drop, combined with AI-assisted scripting. Lowest friction for people who prefer visual tools.
+
+[PlayCanvas](https://playcanvas.com) is a browser-based 3D engine with a visual editor, built-in WebXR support, and one-click publishing.
+
+**Setup:**
+
+1. Create a free account at [playcanvas.com](https://playcanvas.com)
+2. Create a new project → choose the **VR Starter Kit** template (or blank project)
+3. Enable WebXR in your scene: Project Settings → Rendering → Enable XR
+4. For hand tracking, add the WebXR Hand Tracking module to your scene
+5. Install [Claude Desktop](https://claude.ai/download) — the desktop app gives you a chat interface where you can paste code snippets and ask Claude to write PlayCanvas scripts
+6. Use Claude Desktop to help write scripts:
+   - *"Write a PlayCanvas script that spawns a sphere at a random position and detects when the VR hand touches it"*
+   - *"Create a PlayCanvas script for proprioceptive offset — show a ghost hand shifted 10cm to the right"*
+   - *"Add a particle burst effect when the user grabs an object"*
+7. Copy the scripts Claude generates into your PlayCanvas editor (Scripts panel → Add Script → paste)
+8. Hit **Launch** in PlayCanvas → open the link on your Quest browser
+
+**Pros:** Visual scene editor, real-time preview, asset library, collaboration features, no local setup needed.
+**Cons:** Need to learn PlayCanvas editor basics. Scripts are separate from the visual scene. Free tier has limitations.
+
+**Resources:**
+- [PlayCanvas WebXR Guide](https://developer.playcanvas.com/user-manual/xr/)
+- [PlayCanvas VR Starter Kit](https://playcanvas.com/tutorials)
+- [PlayCanvas Hand Tracking](https://developer.playcanvas.com/tutorials/webxr-hand-tracking/)
+
+### Route 3: Unity + Meta SDK (most advanced)
+
+**Best for:** Students with Unity experience who want full access to Quest hardware features, production-quality rendering, and the complete Meta SDK.
+
+Unity with the Meta XR SDK gives you the most powerful and flexible development environment, but also the steepest learning curve and longest setup time.
+
+**Get started:** [Meta Unity Development Guide](https://developers.meta.com/horizon/develop/unity/)
+
+**Pros:** Full Quest hardware access, best performance, huge ecosystem, industry standard.
+**Cons:** Heavy setup (Unity install, SDK config, build & deploy cycle). Requires C# knowledge. Slower iteration than web-based approaches.
+
+---
+
+## WebXR Development Kick Start (Route 1)
 
 A step-by-step guide to get you from zero to building and deploying your own WebXR experiments using Claude Code. Works on **macOS** and **Windows**.
 
