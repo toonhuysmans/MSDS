@@ -61,33 +61,109 @@ This is how every experiment in this repo was built. You write nothing — you d
 
 Follow the **Kick Start guide** below to get started.
 
-### Route 2: PlayCanvas + Claude Desktop (recommended for designers)
+### Route 2: PlayCanvas + Claude Desktop via MCP (recommended for designers)
 
-**Best for:** Designers and visual thinkers who want a 3D editor with drag-and-drop, combined with AI-assisted scripting. Lowest friction for people who prefer visual tools.
+**Best for:** Designers and visual thinkers who want a 3D editor with drag-and-drop, combined with AI that can directly control the editor. Lowest friction for people who prefer visual tools.
 
-[PlayCanvas](https://playcanvas.com) is a browser-based 3D engine with a visual editor, built-in WebXR support, and one-click publishing.
+[PlayCanvas](https://playcanvas.com) is a browser-based 3D engine with a visual editor, built-in WebXR support, and one-click publishing. Using the official PlayCanvas MCP server, Claude Desktop can control the editor directly — creating entities, managing assets, configuring scenes, and more.
 
-**Setup:**
+#### Prerequisites
 
-1. Create a free account at [playcanvas.com](https://playcanvas.com)
-2. Create a new project → choose the **VR Starter Kit** template (or blank project)
-3. Enable WebXR in your scene: Project Settings → Rendering → Enable XR
-4. For hand tracking, add the WebXR Hand Tracking module to your scene
-5. Install [Claude Desktop](https://claude.ai/download) — the desktop app gives you a chat interface where you can paste code snippets and ask Claude to write PlayCanvas scripts
-6. Use Claude Desktop to help write scripts:
-   - *"Write a PlayCanvas script that spawns a sphere at a random position and detects when the VR hand touches it"*
-   - *"Create a PlayCanvas script for proprioceptive offset — show a ghost hand shifted 10cm to the right"*
-   - *"Add a particle burst effect when the user grabs an object"*
-7. Copy the scripts Claude generates into your PlayCanvas editor (Scripts panel → Add Script → paste)
-8. Hit **Launch** in PlayCanvas → open the link on your Quest browser
+- **Claude Desktop** with a Pro subscription (free tier context is too small) — download from [claude.ai/download](https://claude.ai/download)
+- **Node.js 18+** — download from [nodejs.org](https://nodejs.org)
+- **Google Chrome** — the editor extension only runs in Chrome
+- A free **PlayCanvas account** — sign up at [playcanvas.com](https://playcanvas.com)
 
-**Pros:** Visual scene editor, real-time preview, asset library, collaboration features, no local setup needed.
-**Cons:** Need to learn PlayCanvas editor basics. Scripts are separate from the visual scene. Free tier has limitations.
+#### Step 1: Download the MCP Server
+
+Go to [github.com/playcanvas/editor-mcp-server](https://github.com/playcanvas/editor-mcp-server). Click **Code → Download ZIP**. Extract to a convenient folder:
+
+**Windows:** `C:\editor-mcp-server`
+**macOS:** `/Users/your-username/editor-mcp-server`
+
+Then install dependencies:
+
+```bash
+# Windows
+cd C:\editor-mcp-server
+npm install
+
+# macOS
+cd /Users/your-username/editor-mcp-server
+npm install
+```
+
+#### Step 2: Configure Claude Desktop
+
+Go to **Claude → Settings → Developer → Edit Config**. This opens `claude_desktop_config.json`. Paste the config below, adjusting the path:
+
+**Windows:**
+```json
+{
+  "mcpServers": {
+    "playcanvas": {
+      "command": "cmd",
+      "args": ["/c", "npx", "tsx", "C:\\editor-mcp-server\\src\\server.ts"],
+      "env": { "PORT": "52000" }
+    }
+  }
+}
+```
+
+**macOS:**
+```json
+{
+  "mcpServers": {
+    "playcanvas": {
+      "command": "npx",
+      "args": ["tsx", "/Users/your-username/editor-mcp-server/src/server.ts"],
+      "env": { "PORT": "52000" }
+    }
+  }
+}
+```
+
+> **macOS + nvm users:** If you see Node version errors, replace `"command": "npx"` with the full path (run `which npx` in Terminal to find it, e.g. `/Users/you/.nvm/versions/node/v18.17.1/bin/npx`).
+
+Restart Claude Desktop.
+
+#### Step 3: Install the Chrome Extension
+
+1. Open Chrome → go to `chrome://extensions/`
+2. Enable **Developer mode** (toggle top-right)
+3. Click **Load unpacked** → select the `extension` folder inside your MCP server folder
+4. The PlayCanvas MCP extension appears in your extensions list
+
+#### Step 4: Open PlayCanvas and Connect
+
+1. Go to [playcanvas.com](https://playcanvas.com) and open a project in the Editor
+2. Click the **Extensions icon** in Chrome's toolbar → open the PlayCanvas MCP extension
+3. Click **Connect** (port should match your config, default: `52000`)
+4. Switch to **Claude Desktop** and start issuing commands
+
+#### What Claude Can Do Once Connected
+
+- **Entity management** — create, modify, duplicate, reparent, delete entities
+- **Asset management** — create, list, delete, instantiate templates
+- **Scene settings** — render and physics configuration
+- **Asset Store** — search, retrieve, and download assets
+
+Try prompts like:
+- *"Create a VR scene with a floor, some floating cubes, and hand tracking enabled"*
+- *"Add a script to this entity that detects hand collisions and plays a sound"*
+- *"Set up a proprioceptive offset experiment — mirror the right hand with a 10cm lateral shift"*
+
+#### Limitations
+
+- Only **one PlayCanvas Editor instance** can be connected at a time
+- **Claude Pro subscription** strongly recommended for sufficient context
+- Works with **Claude Desktop only** — not the claude.ai web interface
+- Chrome extension requires **Google Chrome**
 
 **Resources:**
+- [PlayCanvas MCP Server (GitHub)](https://github.com/playcanvas/editor-mcp-server)
 - [PlayCanvas WebXR Guide](https://developer.playcanvas.com/user-manual/xr/)
-- [PlayCanvas VR Starter Kit](https://playcanvas.com/tutorials)
-- [PlayCanvas Hand Tracking](https://developer.playcanvas.com/tutorials/webxr-hand-tracking/)
+- [PlayCanvas Hand Tracking Tutorial](https://developer.playcanvas.com/tutorials/webxr-hand-tracking/)
 
 ### Route 3: Unity + Meta SDK (most advanced)
 
