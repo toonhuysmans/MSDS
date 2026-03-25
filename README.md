@@ -153,6 +153,10 @@ npm install -g @anthropic-ai/claude-code
 
 On first run, Claude Code will ask you to log in with your Anthropic account.
 
+> **From here on, you can let Claude do most of these steps for you.** Just start Claude Code (`claude`) and tell it:
+> *"Read the kick start guide at https://github.com/toonhuysmans/MSDS and help me set everything up."*
+> Claude will read the instructions and walk you through forking, cloning, enabling Pages, and getting started.
+
 ### Step 2: Fork and clone this repo
 
 1. Go to [github.com/toonhuysmans/MSDS](https://github.com/toonhuysmans/MSDS)
