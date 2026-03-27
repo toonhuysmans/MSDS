@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebXR Mixed Reality — Scene Physics</title>
+<style>
+  body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; }
+  #enterAR {
+    position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
+    padding: 16px 32px; font-size: 18px; background: #44aaff; color: #000;
+    border: none; border-radius: 8px; cursor: pointer; z-index: 10;
+  }
+  #enterAR:disabled { opacity: 0.4; cursor: default; }
+  #info { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); text-align: center; opacity: 0.7; font-size: 14px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="info">Mixed Reality Scene Physics — Quest 3<br>Trigger to drop boxes · They land on real surfaces</div>
+<button id="enterAR" disabled>Enter MR</button>
+
+<script type="module">
+import * as THREE from 'three';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+
+// ============================================================
+// CONFIG
+// ============================================================
+const BOX_SIZE = 0.08;            // m — dropped box size
+const GRAVITY = -4.0;             // m/s² (softer than real gravity for playfulness)
+const BOUNCE = 0.3;               // coefficient of restitution
+const FRICTION = 0.92;            // velocity damping per frame on contact
+const BOX_COLORS = [0xff4466, 0x44aaff, 0x44ff88, 0xffaa44, 0xdd44ff, 0xffff44];
+const PLANE_COLOR = 0x44aaff;
+const MESH_COLOR = 0x88ff88;
+const SCENE_OPACITY = 0.15;       // transparency of detected scene geometry
+const DROP_COOLDOWN = 300;        // ms between drops per controller
+// ============================================================
+
+// --- Scene ---
+const scene = new THREE.Scene();
+// No background — passthrough
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.xr.enabled = true;
+renderer.sortObjects = true;
+renderer.setClearColor(0x000000, 0); // transparent for passthrough
+document.body.appendChild(renderer.domElement);
+
+// Soft lighting (won't overpower passthrough)
+scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+dirLight.position.set(1, 3, 2);
+scene.add(dirLight);
+
+// --- Controllers ---
+const controllerModelFactory = new XRControllerModelFactory();
+
+const controller0 = renderer.xr.getController(0);
+scene.add(controller0);
+const controller1 = renderer.xr.getController(1);
+scene.add(controller1);
+
+const grip0 = renderer.xr.getControllerGrip(0);
+grip0.add(controllerModelFactory.createControllerModel(grip0));
+scene.add(grip0);
+const grip1 = renderer.xr.getControllerGrip(1);
+grip1.add(controllerModelFactory.createControllerModel(grip1));
+scene.add(grip1);
+
+// Ray lines
+function makeRayLine() {
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 0, -1.5)
+  ]);
+  return new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x44aaff, transparent: true, opacity: 0.4 }));
+}
+controller0.add(makeRayLine());
+controller1.add(makeRayLine());
+
+// --- Scene geometry tracking ---
+// Maps from XRPlane/XRMesh to Three.js mesh for updates
+const planeMap = new Map();
+const meshMap = new Map();
+
+const planeMaterial = new THREE.MeshStandardMaterial({
+  color: PLANE_COLOR,
+  transparent: true,
+  opacity: SCENE_OPACITY,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+  roughness: 0.8,
+  metalness: 0.0
+});
+
+const meshMaterial = new THREE.MeshStandardMaterial({
+  color: MESH_COLOR,
+  transparent: true,
+  opacity: SCENE_OPACITY,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+  wireframe: false,
+  roughness: 0.8,
+  metalness: 0.0
+});
+
+function updatePlanes(frame, refSpace) {
+  if (!frame.detectedPlanes) return;
+
+  const currentPlanes = frame.detectedPlanes;
+
+  // Remove planes that are no longer detected
+  for (const [xrPlane, obj] of planeMap) {
+    if (!currentPlanes.has(xrPlane)) {
+      scene.remove(obj);
+      obj.geometry.dispose();
+      planeMap.delete(xrPlane);
+    }
+  }
+
+  // Add/update detected planes
+  for (const xrPlane of currentPlanes) {
+    let obj = planeMap.get(xrPlane);
+
+    if (!obj) {
+      // Create geometry from polygon vertices
+      const polygon = xrPlane.polygon;
+      if (!polygon || polygon.length < 3) continue;
+
+      const shape = new THREE.Shape();
+      shape.moveTo(polygon[0].x, polygon[0].z);
+      for (let i = 1; i < polygon.length; i++) {
+        shape.lineTo(polygon[i].x, polygon[i].z);
+      }
+      shape.closePath();
+
+      const geo = new THREE.ShapeGeometry(shape);
+      // Rotate from XZ to XY plane (ShapeGeometry is in XY, we need XZ)
+      geo.rotateX(-Math.PI / 2);
+
+      obj = new THREE.Mesh(geo, planeMaterial.clone());
+      obj.renderOrder = -1;
+      obj.matrixAutoUpdate = false;
+
+      // Store plane metadata for collision
+      obj.userData.isSceneGeometry = true;
+      obj.userData.xrPlane = xrPlane;
+
+      scene.add(obj);
+      planeMap.set(xrPlane, obj);
+    }
+
+    // Update transform
+    const pose = frame.getPose(xrPlane.planeSpace, refSpace);
+    if (pose) {
+      obj.matrix.fromArray(pose.transform.matrix);
+    }
+  }
+}
+
+function updateMeshes(frame, refSpace) {
+  if (!frame.detectedMeshes) return;
+
+  const currentMeshes = frame.detectedMeshes;
+
+  // Remove meshes no longer detected
+  for (const [xrMesh, obj] of meshMap) {
+    if (!currentMeshes.has(xrMesh)) {
+      scene.remove(obj);
+      obj.geometry.dispose();
+      meshMap.delete(xrMesh);
+    }
+  }
+
+  // Add/update detected meshes
+  for (const xrMesh of currentMeshes) {
+    let obj = meshMap.get(xrMesh);
+
+    if (!obj || xrMesh.lastChangedTime > (obj.userData.lastChanged || 0)) {
+      // Create or recreate geometry
+      if (obj) {
+        scene.remove(obj);
+        obj.geometry.dispose();
+      }
+
+      const vertices = xrMesh.vertices;
+      const indices = xrMesh.indices;
+      if (!vertices || !indices || vertices.length === 0) continue;
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
+      geo.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+      geo.computeVertexNormals();
+
+      obj = new THREE.Mesh(geo, meshMaterial.clone());
+      obj.renderOrder = -1;
+      obj.matrixAutoUpdate = false;
+
+      obj.userData.isSceneGeometry = true;
+      obj.userData.xrMesh = xrMesh;
+      obj.userData.lastChanged = xrMesh.lastChangedTime;
+      obj.userData.semanticLabel = xrMesh.semanticLabel || '';
+
+      scene.add(obj);
+      meshMap.set(xrMesh, obj);
+    }
+
+    // Update transform
+    const pose = frame.getPose(xrMesh.meshSpace, refSpace);
+    if (pose) {
+      obj.matrix.fromArray(pose.transform.matrix);
+    }
+  }
+}
+
+// --- Dropped boxes with simple physics ---
+const droppedBoxes = []; // { mesh, vel, settled }
+const boxGeo = new THREE.BoxGeometry(BOX_SIZE, BOX_SIZE, BOX_SIZE);
+const _raycaster = new THREE.Raycaster();
+const _down = new THREE.Vector3(0, -1, 0);
+
+function spawnBox(position) {
+  const color = BOX_COLORS[Math.floor(Math.random() * BOX_COLORS.length)];
+  const mat = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.4,
+    metalness: 0.2
+  });
+  const mesh = new THREE.Mesh(boxGeo, mat);
+  mesh.position.copy(position);
+  // Random initial rotation
+  mesh.rotation.set(
+    Math.random() * Math.PI,
+    Math.random() * Math.PI,
+    Math.random() * Math.PI
+  );
+  mesh.castShadow = true;
+  scene.add(mesh);
+
+  droppedBoxes.push({
+    mesh,
+    vel: new THREE.Vector3(0, 0, 0),
+    angVel: new THREE.Vector3(
+      (Math.random() - 0.5) * 3,
+      (Math.random() - 0.5) * 3,
+      (Math.random() - 0.5) * 3
+    ),
+    settled: false
+  });
+}
+
+// Collect all scene geometry meshes for raycasting
+function getSceneColliders() {
+  const colliders = [];
+  for (const [, obj] of planeMap) colliders.push(obj);
+  for (const [, obj] of meshMap) colliders.push(obj);
+  return colliders;
+}
+
+function updatePhysics(dt) {
+  const colliders = getSceneColliders();
+  const halfBox = BOX_SIZE / 2;
+
+  for (const box of droppedBoxes) {
+    if (box.settled) continue;
+
+    // Apply gravity
+    box.vel.y += GRAVITY * dt;
+
+    // Move
+    box.mesh.position.addScaledVector(box.vel, dt);
+
+    // Rotate
+    box.mesh.rotation.x += box.angVel.x * dt;
+    box.mesh.rotation.y += box.angVel.y * dt;
+    box.mesh.rotation.z += box.angVel.z * dt;
+
+    // Raycast downward from box center to detect scene surface
+    _raycaster.set(box.mesh.position, _down);
+    _raycaster.far = halfBox + 0.02; // slightly beyond box bottom
+    _raycaster.near = 0;
+
+    const hits = _raycaster.intersectObjects(colliders, false);
+    if (hits.length > 0) {
+      const hit = hits[0];
+      // Place box on surface
+      box.mesh.position.y = hit.point.y + halfBox;
+
+      // Bounce or settle
+      if (Math.abs(box.vel.y) < 0.05) {
+        box.vel.y = 0;
+        box.vel.x *= FRICTION;
+        box.vel.z *= FRICTION;
+        box.angVel.multiplyScalar(0.9);
+        if (box.vel.length() < 0.01 && box.angVel.length() < 0.1) {
+          box.settled = true;
+          box.angVel.set(0, 0, 0);
+        }
+      } else {
+        box.vel.y *= -BOUNCE;
+        box.vel.x *= FRICTION;
+        box.vel.z *= FRICTION;
+        box.angVel.multiplyScalar(0.7);
+      }
+    }
+
+    // Also raycast upward to check ceiling collisions
+    _raycaster.set(box.mesh.position, new THREE.Vector3(0, 1, 0));
+    _raycaster.far = halfBox + 0.02;
+    const ceilHits = _raycaster.intersectObjects(colliders, false);
+    if (ceilHits.length > 0) {
+      box.mesh.position.y = ceilHits[0].point.y - halfBox;
+      box.vel.y = Math.abs(box.vel.y) * -BOUNCE;
+    }
+
+    // Floor clamp (safety: never fall below y = -2)
+    if (box.mesh.position.y < -2) {
+      scene.remove(box.mesh);
+      box.settled = true;
+    }
+  }
+
+  // Clean up settled boxes that fell through
+  for (let i = droppedBoxes.length - 1; i >= 0; i--) {
+    if (droppedBoxes[i].settled && !droppedBoxes[i].mesh.parent) {
+      droppedBoxes[i].mesh.geometry.dispose();
+      droppedBoxes[i].mesh.material.dispose();
+      droppedBoxes.splice(i, 1);
+    }
+  }
+}
+
+// --- HUD ---
+const hudCanvas = document.createElement('canvas');
+hudCanvas.width = 400;
+hudCanvas.height = 120;
+const hudCtx = hudCanvas.getContext('2d');
+const hudTexture = new THREE.CanvasTexture(hudCanvas);
+
+const hudMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.3, 0.09),
+  new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.8 })
+);
+hudMesh.position.set(0, 1.7, -1.0);
+scene.add(hudMesh);
+
+function drawHUD() {
+  const ctx = hudCtx;
+  ctx.clearRect(0, 0, 400, 120);
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.beginPath();
+  ctx.roundRect(0, 0, 400, 120, 10);
+  ctx.fill();
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '18px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(`Planes: ${planeMap.size}  Meshes: ${meshMap.size}`, 200, 30);
+  ctx.fillText(`Boxes: ${droppedBoxes.length}`, 200, 55);
+  ctx.fillStyle = '#aaa';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('Pull trigger to drop a box', 200, 85);
+
+  hudTexture.needsUpdate = true;
+}
+drawHUD();
+
+// --- WebXR session (AR with passthrough) ---
+const enterBtn = document.getElementById('enterAR');
+
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-ar').then(supported => {
+    if (supported) {
+      enterBtn.disabled = false;
+      enterBtn.textContent = 'Enter MR';
+    } else {
+      enterBtn.textContent = 'AR Not Supported';
+    }
+  });
+} else {
+  enterBtn.textContent = 'WebXR Not Available';
+}
+
+let xrSession = null;
+let refSpace = null;
+
+enterBtn.addEventListener('click', async () => {
+  if (xrSession) return;
+  try {
+    const session = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: [
+        'plane-detection',
+        'mesh-detection',
+        'anchors',
+        'hand-tracking',
+        'hit-test'
+      ]
+    });
+    xrSession = session;
+    renderer.xr.setSession(session);
+
+    session.addEventListener('end', () => { xrSession = null; });
+    enterBtn.textContent = 'In MR';
+
+    // If no planes detected after a few seconds, prompt Space Setup
+    setTimeout(() => {
+      if (planeMap.size === 0 && session.initiateRoomCapture) {
+        session.initiateRoomCapture().catch(() => {});
+      }
+    }, 4000);
+  } catch (e) {
+    console.error('Failed to start AR session:', e);
+    enterBtn.textContent = 'Error — see console';
+  }
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// --- Render loop ---
+let prevTime = 0;
+const lastDrop = [0, 0]; // cooldown per controller
+const prevTrigger = [false, false];
+
+renderer.setAnimationLoop((timestamp, frame) => {
+  const now = performance.now();
+  const dt = prevTime > 0 ? Math.min((now - prevTime) / 1000, 0.1) : 0.016;
+  prevTime = now;
+
+  if (frame && renderer.xr.isPresenting) {
+    const session = renderer.xr.getSession();
+    refSpace = renderer.xr.getReferenceSpace();
+
+    // Update scene geometry
+    updatePlanes(frame, refSpace);
+    updateMeshes(frame, refSpace);
+
+    // Controller input: drop boxes on trigger
+    for (let ci = 0; ci < 2; ci++) {
+      const source = session.inputSources[ci];
+      if (!source || !source.gamepad) continue;
+
+      const triggerPressed = source.gamepad.buttons[0] && source.gamepad.buttons[0].pressed;
+      if (triggerPressed && !prevTrigger[ci] && (now - lastDrop[ci]) > DROP_COOLDOWN) {
+        // Spawn box at controller position
+        const ctrl = ci === 0 ? controller0 : controller1;
+        const pos = new THREE.Vector3();
+        pos.setFromMatrixPosition(ctrl.matrixWorld);
+        // Offset slightly forward from controller
+        const fwd = new THREE.Vector3(0, 0, -0.1).applyQuaternion(ctrl.quaternion);
+        pos.add(fwd);
+        spawnBox(pos);
+        lastDrop[ci] = now;
+
+        // Haptic feedback
+        if (source.gamepad.hapticActuators && source.gamepad.hapticActuators.length > 0) {
+          source.gamepad.hapticActuators[0].pulse(0.4, 50);
+        }
+        if (source.gamepad.vibrationActuator) {
+          source.gamepad.vibrationActuator.playEffect('dual-rumble', {
+            duration: 50, strongMagnitude: 0.3, weakMagnitude: 0.4
+          }).catch(() => {});
+        }
+      }
+      prevTrigger[ci] = triggerPressed;
+    }
+
+    // Physics
+    updatePhysics(dt);
+
+    drawHUD();
+  }
+
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
