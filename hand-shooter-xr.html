@@ -50,6 +50,61 @@ canvas { display:block; }
 var logEl = document.getElementById('log');
 function log(msg){ console.log(msg); logEl.innerHTML += msg + '<br>'; }
 
+// Audio
+var audioCtx = null;
+function ensureAudio(){
+  if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state==='suspended') audioCtx.resume();
+}
+
+function playShoot(side){
+  ensureAudio();
+  var osc=audioCtx.createOscillator();
+  var gain=audioCtx.createGain();
+  var pan=audioCtx.createStereoPanner();
+  pan.pan.value=side==='left'?-0.6:0.6;
+  osc.type='sawtooth';
+  osc.frequency.setValueAtTime(880,audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(220,audioCtx.currentTime+0.15);
+  gain.gain.setValueAtTime(0.15,audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+0.15);
+  osc.connect(gain); gain.connect(pan); pan.connect(audioCtx.destination);
+  osc.start(); osc.stop(audioCtx.currentTime+0.15);
+}
+
+function playHit(){
+  ensureAudio();
+  var t=audioCtx.currentTime;
+  // Impact thud
+  var osc1=audioCtx.createOscillator();
+  var g1=audioCtx.createGain();
+  osc1.type='sine'; osc1.frequency.setValueAtTime(150,t); osc1.frequency.exponentialRampToValueAtTime(40,t+0.2);
+  g1.gain.setValueAtTime(0.25,t); g1.gain.exponentialRampToValueAtTime(0.001,t+0.2);
+  osc1.connect(g1); g1.connect(audioCtx.destination); osc1.start(t); osc1.stop(t+0.2);
+  // Bright chime
+  var osc2=audioCtx.createOscillator();
+  var g2=audioCtx.createGain();
+  osc2.type='triangle'; osc2.frequency.setValueAtTime(1200+Math.random()*400,t);
+  g2.gain.setValueAtTime(0.12,t); g2.gain.exponentialRampToValueAtTime(0.001,t+0.3);
+  osc2.connect(g2); g2.connect(audioCtx.destination); osc2.start(t); osc2.stop(t+0.3);
+}
+
+function playScore(){
+  ensureAudio();
+  var t=audioCtx.currentTime;
+  var notes=[523.25,659.25,783.99]; // C5 E5 G5
+  notes.forEach(function(freq,i){
+    var osc=audioCtx.createOscillator();
+    var g=audioCtx.createGain();
+    osc.type='sine'; osc.frequency.value=freq;
+    g.gain.setValueAtTime(0,t+i*0.08);
+    g.gain.linearRampToValueAtTime(0.1,t+i*0.08+0.02);
+    g.gain.exponentialRampToValueAtTime(0.001,t+i*0.08+0.35);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(t+i*0.08); osc.stop(t+i*0.08+0.35);
+  });
+}
+
 // Canvas + WebGL context
 var canvas = document.createElement('canvas');
 canvas.style.position = 'fixed';
@@ -175,7 +230,7 @@ function boom(pos,color){
 
 // Score
 var score = 0;
-function addScore(){ score+=10; document.getElementById('sv').textContent=score; }
+function addScore(){ score+=10; document.getElementById('sv').textContent=score; playScore(); }
 
 // Pinch
 var pinchDown={left:false,right:false};
@@ -223,6 +278,7 @@ function trySession(idx){
 
 btn.addEventListener('click', function(){
   if(!navigator.xr){ log('navigator.xr undefined - need HTTPS'); return; }
+  ensureAudio();
   trySession(0);
 });
 
@@ -269,6 +325,7 @@ function updateHand(src,side,frame,refSpace,dt){
       if(pos[IDX_WRIST]&&pos[IDX_MIDDLE_TIP]){
         var dir=pos[IDX_MIDDLE_TIP].clone().sub(pos[IDX_WRIST]).normalize();
         fireProjectile(pos[IDX_INDEX_TIP].clone(),dir,side);
+        playShoot(side);
       }
       var s=side;
       handMeshes[s][IDX_INDEX_TIP].scale.setScalar(4);
@@ -290,6 +347,7 @@ function checkCollisions(){
       _s2.center.copy(tgt.mesh.position); _s2.radius=0.22;
       if(_s1.intersectsSphere(_s2)){
         boom(tgt.mesh.position.clone(),tgt.mesh.material.color);
+        playHit();
         addScore();
         scene.remove(tgt.mesh); targets.splice(ti2,1);
         scene.remove(proj.mesh); proj.life=-1; projectiles.splice(pi,1);
