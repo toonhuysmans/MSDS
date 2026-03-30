@@ -35,6 +35,7 @@
 
 <script type="module">
 import * as THREE from 'three';
+import { Reflector } from 'three/addons/objects/Reflector.js';
 
 // ============================================================
 // BODY JOINT NAMES (70 core joints, excluding detailed hand fingers for mesh)
@@ -171,19 +172,31 @@ scene.add(dirLight);
 
 scene.add(new THREE.GridHelper(20, 40, 0x333333, 0x222222));
 
-// --- Mirror plane (so you can see yourself) ---
+// --- Mirror (real reflective surface using Reflector) ---
 const mirrorDist = 2.0;
-const mirrorGeo = new THREE.PlaneGeometry(3, 3);
-const mirrorMat = new THREE.MeshStandardMaterial({
-  color: 0x222233,
-  roughness: 0.3,
-  metalness: 0.8,
-  transparent: true,
-  opacity: 0.3
+const mirror = new Reflector(new THREE.PlaneGeometry(2, 2.5), {
+  color: 0x889999,
+  textureWidth: 1024,
+  textureHeight: 1024,
+  clipBias: 0.003
 });
-const mirrorPlane = new THREE.Mesh(mirrorGeo, mirrorMat);
-mirrorPlane.position.set(0, 1.5, -mirrorDist);
-scene.add(mirrorPlane);
+mirror.position.set(0, 1.25, -mirrorDist);
+scene.add(mirror);
+
+// Frame around the mirror
+const frameMat = new THREE.MeshStandardMaterial({ color: 0x333344, roughness: 0.5, metalness: 0.3 });
+const frameTop = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.05, 0.05), frameMat);
+frameTop.position.set(0, 2.5 + 0.025, -mirrorDist);
+scene.add(frameTop);
+const frameBot = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.05, 0.05), frameMat);
+frameBot.position.set(0, 0.0 - 0.025, -mirrorDist);
+scene.add(frameBot);
+const frameLeft = new THREE.Mesh(new THREE.BoxGeometry(0.05, 2.6, 0.05), frameMat);
+frameLeft.position.set(-1.025, 1.25, -mirrorDist);
+scene.add(frameLeft);
+const frameRight = new THREE.Mesh(new THREE.BoxGeometry(0.05, 2.6, 0.05), frameMat);
+frameRight.position.set(1.025, 1.25, -mirrorDist);
+scene.add(frameRight);
 
 // --- Body mesh: joints as spheres, bones as cylinders ---
 const bodyMaterial = new THREE.MeshStandardMaterial({
