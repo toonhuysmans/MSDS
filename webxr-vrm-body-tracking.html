@@ -177,6 +177,11 @@ loader.load(
     // sees their avatar's front face reflected back.
     vrm.scene.rotation.y = Math.PI;
 
+    // Disable lookAt — otherwise VRM internally rotates the head/eyes toward
+    // the camera, which differs between main and mirror (different positions
+    // relative to the camera), causing pose divergence.
+    vrm.lookAt = undefined;
+
     vrm.scene.visible = false;
     scene.add(vrm.scene);
 
@@ -186,6 +191,7 @@ loader.load(
       vrmMirror.scene.rotation.y = Math.PI;
       vrmMirror.scene.visible = false;
       vrmMirror.scene.scale.set(1, 1, -1); // Z-flip for mirror reflection
+      vrmMirror.lookAt = undefined;
       scene.add(vrmMirror.scene);
     }, undefined, (err) => console.warn('Mirror VRM load failed:', err));
 
@@ -300,7 +306,7 @@ function updateVRMFromBody(frame, refSpace) {
 
   driveVRM(vrm, body, frame, refSpace, true);
 
-  // Mirror
+  // Mirror position
   if (vrmMirror) {
     vrmMirror.scene.visible = true;
     vrmMirror.scene.position.set(
@@ -308,7 +314,6 @@ function updateVRMFromBody(frame, refSpace) {
       vrm.scene.position.y,
       2 * MIRROR_Z - vrm.scene.position.z
     );
-    driveVRM(vrmMirror, body, frame, refSpace, false);
   }
 
   return true;
@@ -467,6 +472,16 @@ renderer.setAnimationLoop((timestamp, frame) => {
 
   // VRM update: applies normalized pose to actual skeleton, spring bones, etc.
   if (vrm) vrm.update(dt);
+
+  // Copy all normalized bone states from main → mirror so they can't diverge.
+  // The mirror scene has scale.set(1,1,-1) which handles the Z-flip visually.
+  if (vrm && vrmMirror) {
+    for (const boneName of Object.values(VRMHumanBoneName)) {
+      const src = vrm.humanoid.getNormalizedBoneNode(boneName);
+      const dst = vrmMirror.humanoid.getNormalizedBoneNode(boneName);
+      if (src && dst) dst.quaternion.copy(src.quaternion);
+    }
+  }
   if (vrmMirror) vrmMirror.update(dt);
 
   renderer.render(scene, camera);
