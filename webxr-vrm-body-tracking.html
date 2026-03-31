@@ -54,38 +54,17 @@ const MIRROR_Z = -2.0;  // Z position of the mirror wall
 // ============================================================
 // XR body joint → VRM humanoid bone name
 // ============================================================
+// DEBUG: minimal mapping — wrists only.
+// Expand once wrist orientation looks correct.
 const XR_TO_VRM = {
-  'hips':             VRMHumanBoneName.Hips,
-  'spine-lower':      VRMHumanBoneName.Spine,
-  'spine-middle':     VRMHumanBoneName.Chest,
-  'spine-upper':      VRMHumanBoneName.UpperChest,
-  'neck':             VRMHumanBoneName.Neck,
-  'head':             VRMHumanBoneName.Head,
-  'left-shoulder':    VRMHumanBoneName.LeftShoulder,
-  'left-arm-upper':   VRMHumanBoneName.LeftUpperArm,
-  'left-arm-lower':   VRMHumanBoneName.LeftLowerArm,
   'left-hand-wrist':  VRMHumanBoneName.LeftHand,
-  'right-shoulder':   VRMHumanBoneName.RightShoulder,
-  'right-arm-upper':  VRMHumanBoneName.RightUpperArm,
-  'right-arm-lower':  VRMHumanBoneName.RightLowerArm,
   'right-hand-wrist': VRMHumanBoneName.RightHand,
-  'left-upper-leg':   VRMHumanBoneName.LeftUpperLeg,
-  'left-lower-leg':   VRMHumanBoneName.LeftLowerLeg,
-  'left-foot-ankle':  VRMHumanBoneName.LeftFoot,
-  'left-foot-ball':   VRMHumanBoneName.LeftToes,
-  'right-upper-leg':  VRMHumanBoneName.RightUpperLeg,
-  'right-lower-leg':  VRMHumanBoneName.RightLowerLeg,
-  'right-foot-ankle': VRMHumanBoneName.RightFoot,
-  'right-foot-ball':  VRMHumanBoneName.RightToes,
 };
 
-// Drive in parent-first order so getWorldQuaternion() is always current
+// Parent-first order (only wrists here, so order doesn't matter yet)
 const BONE_DRIVE_ORDER = [
-  'hips', 'spine-lower', 'spine-middle', 'spine-upper', 'neck', 'head',
-  'left-shoulder',  'left-arm-upper',  'left-arm-lower',  'left-hand-wrist',
-  'right-shoulder', 'right-arm-upper', 'right-arm-lower', 'right-hand-wrist',
-  'left-upper-leg',  'left-lower-leg',  'left-foot-ankle',  'left-foot-ball',
-  'right-upper-leg', 'right-lower-leg', 'right-foot-ankle', 'right-foot-ball',
+  'left-hand-wrist',
+  'right-hand-wrist',
 ];
 
 // ============================================================
