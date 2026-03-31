@@ -53,10 +53,14 @@ const VRM_URL = 'https://raw.githubusercontent.com/pixiv/three-vrm/dev/packages/
 const MIRROR_Z = -2.0;  // Z position of the mirror wall
 
 // ============================================================
-// XR body joint → VRM humanoid bone name
+// XR body joint → VRM humanoid bone name (full body)
 // ============================================================
-// DEBUG: head + arms + wrists.
 const XR_TO_VRM = {
+  'hips':             VRMHumanBoneName.Hips,
+  'spine-lower':      VRMHumanBoneName.Spine,
+  'spine-middle':     VRMHumanBoneName.Chest,
+  'spine-upper':      VRMHumanBoneName.UpperChest,
+  'neck':             VRMHumanBoneName.Neck,
   'head':             VRMHumanBoneName.Head,
   'left-shoulder':    VRMHumanBoneName.LeftShoulder,
   'left-arm-upper':   VRMHumanBoneName.LeftUpperArm,
@@ -66,20 +70,34 @@ const XR_TO_VRM = {
   'right-arm-upper':  VRMHumanBoneName.RightUpperArm,
   'right-arm-lower':  VRMHumanBoneName.RightLowerArm,
   'right-hand-wrist': VRMHumanBoneName.RightHand,
+  'left-upper-leg':   VRMHumanBoneName.LeftUpperLeg,
+  'left-lower-leg':   VRMHumanBoneName.LeftLowerLeg,
+  'left-foot-ankle':  VRMHumanBoneName.LeftFoot,
+  'left-foot-ball':   VRMHumanBoneName.LeftToes,
+  'right-upper-leg':  VRMHumanBoneName.RightUpperLeg,
+  'right-lower-leg':  VRMHumanBoneName.RightLowerLeg,
+  'right-foot-ankle': VRMHumanBoneName.RightFoot,
+  'right-foot-ball':  VRMHumanBoneName.RightToes,
 };
 
+// Parent-first order so parent bones are driven before children
 const BONE_DRIVE_ORDER = [
-  'head',
-  'left-shoulder',  'left-arm-upper',  'left-arm-lower',  'left-hand-wrist',
-  'right-shoulder', 'right-arm-upper', 'right-arm-lower', 'right-hand-wrist',
+  'hips',
+  'spine-lower', 'spine-middle', 'spine-upper', 'neck', 'head',
+  'left-shoulder',   'left-arm-upper',   'left-arm-lower',   'left-hand-wrist',
+  'right-shoulder',  'right-arm-upper',  'right-arm-lower',  'right-hand-wrist',
+  'left-upper-leg',  'left-lower-leg',   'left-foot-ankle',  'left-foot-ball',
+  'right-upper-leg', 'right-lower-leg',  'right-foot-ankle', 'right-foot-ball',
 ];
 
-// Joints we need to capture at T-pose (driven joints + their XR parents)
+// All joints to capture at T-pose (every driven joint + its XR parents)
 const CAL_JOINTS = [
-  'neck', 'head',
-  'spine-upper',
-  'left-shoulder',  'left-arm-upper',  'left-arm-lower',  'left-hand-wrist',
-  'right-shoulder', 'right-arm-upper', 'right-arm-lower', 'right-hand-wrist',
+  'hips',
+  'spine-lower', 'spine-middle', 'spine-upper', 'neck', 'head',
+  'left-shoulder',   'left-arm-upper',   'left-arm-lower',   'left-hand-wrist',
+  'right-shoulder',  'right-arm-upper',  'right-arm-lower',  'right-hand-wrist',
+  'left-upper-leg',  'left-lower-leg',   'left-foot-ankle',  'left-foot-ball',
+  'right-upper-leg', 'right-lower-leg',  'right-foot-ankle', 'right-foot-ball',
 ];
 
 // Calibration state
@@ -273,9 +291,15 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
       }
     }
 
-    // Root or parent unavailable — use world quat
-    if (isMain) debugJointStatus[xrJoint] = `✓ world w=${jointQuat.w.toFixed(2)}`;
-    boneNode.quaternion.copy(jointQuat);
+    // Root joint (hips) or parent unavailable — world quat with calibration offset
+    if (isCalibrated && calibRest[xrJoint]) {
+      const corrected = calibRest[xrJoint].clone().invert().multiply(jointQuat);
+      if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
+      boneNode.quaternion.copy(corrected);
+    } else {
+      if (isMain) debugJointStatus[xrJoint] = `✓ world w=${jointQuat.w.toFixed(2)}`;
+      boneNode.quaternion.copy(jointQuat);
+    }
   }
 }
 
@@ -305,11 +329,11 @@ function updateVRMFromBody(frame, refSpace) {
 // HUD
 // ============================================================
 const hudCanvas = document.createElement('canvas');
-hudCanvas.width = 512; hudCanvas.height = 340;
+hudCanvas.width = 512; hudCanvas.height = 560;
 const hudCtx = hudCanvas.getContext('2d');
 const hudTexture = new THREE.CanvasTexture(hudCanvas);
 const hudMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.45, 0.30),
+  new THREE.PlaneGeometry(0.45, 0.49),
   new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.9 })
 );
 hudMesh.position.set(0, 1.8, -1.0);
@@ -319,9 +343,9 @@ let jointCount = 0;
 
 function drawHUD() {
   const ctx = hudCtx;
-  ctx.clearRect(0, 0, 512, 340);
+  ctx.clearRect(0, 0, 512, 560);
   ctx.fillStyle = 'rgba(10,10,20,0.85)';
-  ctx.beginPath(); ctx.roundRect(0, 0, 512, 340, 10); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(0, 0, 512, 560, 10); ctx.fill();
 
   ctx.font = 'bold 18px monospace';
   ctx.textAlign = 'center';
@@ -344,6 +368,7 @@ function drawHUD() {
   }
 
   // Per-joint status
+  ctx.font = '11px monospace';
   ctx.textAlign = 'left';
   let y = 68;
   for (const joint of BONE_DRIVE_ORDER) {
@@ -351,7 +376,7 @@ function drawHUD() {
     const ok = status.startsWith('✓');
     ctx.fillStyle = ok ? '#44ff88' : status.startsWith('~') ? '#ffaa44' : '#ff6644';
     ctx.fillText(`${joint}: ${status}`, 12, y);
-    y += 24;
+    y += 21;
   }
 
   hudTexture.needsUpdate = true;
