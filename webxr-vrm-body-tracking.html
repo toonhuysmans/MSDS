@@ -257,6 +257,10 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
           const restRel = calibRest[parentXRJoint].clone().invert().multiply(calibRest[xrJoint]);
           // Subtract T-pose offset → pure delta from T-pose = what VRM needs
           const corrected = restRel.invert().multiply(rel);
+          // Meta's body tracking uses mirrored joint coordinate frames for the
+          // left side — the delta rotation comes out as the conjugate (inverse)
+          // of what VRM expects. Conjugate to correct it.
+          if (xrJoint.startsWith('left-')) corrected.conjugate();
           if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
           boneNode.quaternion.copy(corrected);
         } else {
