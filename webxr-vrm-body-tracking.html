@@ -387,7 +387,7 @@ function updateVRMFromBody(frame, refSpace) {
 // HUD
 // ============================================================
 const hudCanvas = document.createElement('canvas');
-hudCanvas.width = 512; hudCanvas.height = 560;
+hudCanvas.width = 512; hudCanvas.height = 600;
 const hudCtx = hudCanvas.getContext('2d');
 const hudTexture = new THREE.CanvasTexture(hudCanvas);
 const hudMesh = new THREE.Mesh(
@@ -395,27 +395,23 @@ const hudMesh = new THREE.Mesh(
   new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.9 })
 );
 hudMesh.position.set(0, 1.8, -1.0);
+hudMesh.scale.set(1, 600/560, 1);  // match taller canvas
 scene.add(hudMesh);
 
 let jointCount = 0;
+let debugBtnsR = [];  // right controller button states
+let debugBtnsL = [];  // left controller button states
 
 function drawHUD() {
   const ctx = hudCtx;
-  ctx.clearRect(0, 0, 512, 560);
+  ctx.clearRect(0, 0, 512, 600);
   ctx.fillStyle = 'rgba(10,10,20,0.85)';
-  ctx.beginPath(); ctx.roundRect(0, 0, 512, 560, 10); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(0, 0, 512, 600, 10); ctx.fill();
 
   ctx.font = 'bold 18px monospace';
   ctx.textAlign = 'center';
   ctx.fillStyle = jointCount > 0 ? '#44ff88' : '#ff4444';
   ctx.fillText(jointCount > 0 ? 'Body Tracking Active' : 'No Body Tracking', 256, 24);
-
-  // Recording status
-  if (isRecording) {
-    ctx.fillStyle = '#ff4444';
-    ctx.font = 'bold 14px monospace';
-    ctx.fillText(`⏺ REC  frame ${csvFrameNum}/${MAX_RECORD_FRAMES}  (left thumbstick to stop)`, 256, 44);
-  }
 
   // Calibration status row
   ctx.font = '13px monospace';
@@ -423,19 +419,35 @@ function drawHUD() {
     ? Math.ceil((calibCountdownEnd - performance.now()) / 1000) : 0;
   if (remaining > 0) {
     ctx.fillStyle = '#ffdd00';
-    ctx.fillText(`Arms OUT horizontal — calibrating in ${remaining}…`, 256, 46);
+    ctx.fillText(`Arms OUT horizontal — calibrating in ${remaining}…`, 256, 44);
   } else if (isCalibrated) {
     ctx.fillStyle = '#44ff88';
-    ctx.fillText('T-pose calibrated ✓  (thumbstick to redo)', 256, 46);
+    ctx.fillText('T-pose calibrated ✓  (R-stick to redo)', 256, 44);
   } else {
     ctx.fillStyle = '#ffaa44';
-    ctx.fillText('Spread arms out → press RIGHT THUMBSTICK', 256, 46);
+    ctx.fillText('Spread arms out → press RIGHT THUMBSTICK', 256, 44);
   }
+
+  // Recording status
+  if (isRecording) {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 13px monospace';
+    ctx.fillText(`⏺ REC  ${csvFrameNum}/${MAX_RECORD_FRAMES}  (L-stick to stop)`, 256, 60);
+  }
+
+  // Controller button debug: shows which button indices are pressed
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'left';
+  const rBtns = debugBtnsR.map((v,i) => v ? `[${i}]` : `${i}`).join(' ');
+  const lBtns = debugBtnsL.map((v,i) => v ? `[${i}]` : `${i}`).join(' ');
+  ctx.fillStyle = '#aaaaff';
+  ctx.fillText(`R-ctrl: ${rBtns || 'none'}`, 12, 76);
+  ctx.fillText(`L-ctrl: ${lBtns || 'none'}`, 12, 90);
 
   // Per-joint status
   ctx.font = '11px monospace';
   ctx.textAlign = 'left';
-  let y = 68;
+  let y = 108;
   for (const joint of BONE_DRIVE_ORDER) {
     const status = debugJointStatus[joint] || '…';
     const ok = status.startsWith('✓');
@@ -512,19 +524,20 @@ renderer.setAnimationLoop((timestamp, frame) => {
     // Controller inputs: right thumbstick = calibrate, left thumbstick = record
     if (xrSession) {
       for (const src of xrSession.inputSources) {
-        if (src.handedness === 'right' && src.gamepad) {
+        if (!src.gamepad) continue;
+        if (src.handedness === 'right') {
+          debugBtnsR = src.gamepad.buttons.map(b => b.pressed);
           const pressed = src.gamepad.buttons[3]?.pressed ?? false;
           if (pressed && !thumbstickWasPressed && calibCountdownEnd === 0) {
             calibCountdownEnd = performance.now() + 3000;
             isCalibrated = false;
           }
           thumbstickWasPressed = pressed;
-        }
-        if (src.handedness === 'left' && src.gamepad) {
+        } else if (src.handedness === 'left') {
+          debugBtnsL = src.gamepad.buttons.map(b => b.pressed);
           const pressed = src.gamepad.buttons[3]?.pressed ?? false;
           if (pressed && !leftThumbWasPressed) toggleRecording();
           leftThumbWasPressed = pressed;
-          break;
         }
       }
     }
