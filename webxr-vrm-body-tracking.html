@@ -73,6 +73,20 @@ const BONE_DRIVE_ORDER = [
   'right-shoulder', 'right-arm-upper', 'right-arm-lower', 'right-hand-wrist',
 ];
 
+// Joints we need to capture at T-pose (driven joints + their XR parents)
+const CAL_JOINTS = [
+  'neck', 'head',
+  'spine-upper',
+  'left-shoulder',  'left-arm-upper',  'left-arm-lower',  'left-hand-wrist',
+  'right-shoulder', 'right-arm-upper', 'right-arm-lower', 'right-hand-wrist',
+];
+
+// Calibration state
+const calibRest = {};   // joint → THREE.Quaternion sampled at T-pose
+let isCalibrated = false;
+let calibCountdownEnd = 0;   // performance.now() timestamp when sampling fires; 0 = idle
+let thumbstickWasPressed = false;
+
 // XR body joint hierarchy — needed to compute relative rotations
 const XR_PARENT = {
   'spine-lower':      'hips',
@@ -210,6 +224,16 @@ function getXRQuat(body, frame, refSpace, jointName) {
   return new THREE.Quaternion(q.x, q.y, q.z, q.w);
 }
 
+function captureTPose(body, frame, refSpace) {
+  let n = 0;
+  for (const name of CAL_JOINTS) {
+    const q = getXRQuat(body, frame, refSpace, name);
+    if (q) { calibRest[name] = q; n++; }
+  }
+  isCalibrated = n > 0;
+  console.log(`T-pose captured: ${n}/${CAL_JOINTS.length} joints`);
+}
+
 // Debug state: per-joint status shown in HUD (only populated for main vrm, not mirror)
 const debugJointStatus = {};
 
@@ -231,10 +255,20 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
     if (parentXRJoint) {
       const parentQuat = getXRQuat(body, frame, refSpace, parentXRJoint);
       if (parentQuat) {
-        parentQuat.invert();
-        const rel = parentQuat.multiply(jointQuat);
-        if (isMain) debugJointStatus[xrJoint] = `✓ w=${rel.w.toFixed(2)}`;
-        boneNode.quaternion.copy(rel);
+        // Raw relative rotation: how much child rotated vs parent in world space
+        const rel = parentQuat.clone().invert().multiply(jointQuat);
+
+        if (isCalibrated && calibRest[parentXRJoint] && calibRest[xrJoint]) {
+          // T-pose relative rotation (constant offset at rest)
+          const restRel = calibRest[parentXRJoint].clone().invert().multiply(calibRest[xrJoint]);
+          // Subtract T-pose offset → pure delta from T-pose = what VRM needs
+          const corrected = restRel.invert().multiply(rel);
+          if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
+          boneNode.quaternion.copy(corrected);
+        } else {
+          if (isMain) debugJointStatus[xrJoint] = `~raw w=${rel.w.toFixed(2)}`;
+          boneNode.quaternion.copy(rel);
+        }
         continue;
       } else {
         if (isMain) debugJointStatus[xrJoint] = `✗ parent(${parentXRJoint}) null`;
@@ -284,11 +318,11 @@ function updateVRMFromBody(frame, refSpace) {
 // HUD
 // ============================================================
 const hudCanvas = document.createElement('canvas');
-hudCanvas.width = 512; hudCanvas.height = 300;
+hudCanvas.width = 512; hudCanvas.height = 340;
 const hudCtx = hudCanvas.getContext('2d');
 const hudTexture = new THREE.CanvasTexture(hudCanvas);
 const hudMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.45, 0.26),
+  new THREE.PlaneGeometry(0.45, 0.30),
   new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.9 })
 );
 hudMesh.position.set(0, 1.8, -1.0);
@@ -298,25 +332,39 @@ let jointCount = 0;
 
 function drawHUD() {
   const ctx = hudCtx;
-  ctx.clearRect(0, 0, 512, 300);
+  ctx.clearRect(0, 0, 512, 340);
   ctx.fillStyle = 'rgba(10,10,20,0.85)';
-  ctx.beginPath(); ctx.roundRect(0, 0, 512, 300, 10); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(0, 0, 512, 340, 10); ctx.fill();
 
-  ctx.fillStyle = jointCount > 0 ? '#44ff88' : '#ff4444';
   ctx.font = 'bold 18px monospace';
   ctx.textAlign = 'center';
+  ctx.fillStyle = jointCount > 0 ? '#44ff88' : '#ff4444';
   ctx.fillText(jointCount > 0 ? 'Body Tracking Active' : 'No Body Tracking', 256, 24);
 
-  // Per-joint status
+  // Calibration status row
   ctx.font = '13px monospace';
+  const remaining = calibCountdownEnd > 0
+    ? Math.ceil((calibCountdownEnd - performance.now()) / 1000) : 0;
+  if (remaining > 0) {
+    ctx.fillStyle = '#ffdd00';
+    ctx.fillText(`Arms OUT horizontal — calibrating in ${remaining}…`, 256, 46);
+  } else if (isCalibrated) {
+    ctx.fillStyle = '#44ff88';
+    ctx.fillText('T-pose calibrated ✓  (thumbstick to redo)', 256, 46);
+  } else {
+    ctx.fillStyle = '#ffaa44';
+    ctx.fillText('Spread arms out → press RIGHT THUMBSTICK', 256, 46);
+  }
+
+  // Per-joint status
   ctx.textAlign = 'left';
-  let y = 50;
+  let y = 68;
   for (const joint of BONE_DRIVE_ORDER) {
     const status = debugJointStatus[joint] || '…';
     const ok = status.startsWith('✓');
-    ctx.fillStyle = ok ? '#44ff88' : '#ff6644';
+    ctx.fillStyle = ok ? '#44ff88' : status.startsWith('~') ? '#ffaa44' : '#ff6644';
     ctx.fillText(`${joint}: ${status}`, 12, y);
-    y += 20;
+    y += 24;
   }
 
   hudTexture.needsUpdate = true;
@@ -383,6 +431,27 @@ renderer.setAnimationLoop((timestamp, frame) => {
 
   if (frame && renderer.xr.isPresenting) {
     refSpace = renderer.xr.getReferenceSpace();
+
+    // Right thumbstick press starts 3-second T-pose countdown
+    if (xrSession) {
+      for (const src of xrSession.inputSources) {
+        if (src.handedness === 'right' && src.gamepad) {
+          const pressed = src.gamepad.buttons[3]?.pressed ?? false;
+          if (pressed && !thumbstickWasPressed && calibCountdownEnd === 0) {
+            calibCountdownEnd = performance.now() + 3000;
+            isCalibrated = false;
+          }
+          thumbstickWasPressed = pressed;
+          break;
+        }
+      }
+    }
+
+    // Fire calibration when countdown expires
+    if (calibCountdownEnd > 0 && performance.now() >= calibCountdownEnd) {
+      calibCountdownEnd = 0;
+      if (frame.body) captureTPose(frame.body, frame, refSpace);
+    }
 
     updateVRMFromBody(frame, refSpace);
 
