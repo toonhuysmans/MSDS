@@ -42,7 +42,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { VRMLoaderPlugin, VRMHumanBoneName, VRMUtils } from '@pixiv/three-vrm';
+import { VRMLoaderPlugin, VRMHumanBoneName } from '@pixiv/three-vrm';
 
 // ============================================================
 // CONFIG
@@ -54,18 +54,39 @@ const MIRROR_Z = -2.0;  // Z position of the mirror wall
 // ============================================================
 // XR body joint → VRM humanoid bone name
 // ============================================================
-// DEBUG: minimal mapping — wrists only.
-// Expand once wrist orientation looks correct.
+// DEBUG: head only.
+// Using relative rotation: xrParentQuat⁻¹ × xrJointQuat
+// This maps the joint's rotation relative to its XR parent → VRM normalized bone local quat.
 const XR_TO_VRM = {
-  'left-hand-wrist':  VRMHumanBoneName.LeftHand,
-  'right-hand-wrist': VRMHumanBoneName.RightHand,
+  'head': VRMHumanBoneName.Head,
 };
 
-// Parent-first order (only wrists here, so order doesn't matter yet)
-const BONE_DRIVE_ORDER = [
-  'left-hand-wrist',
-  'right-hand-wrist',
-];
+const BONE_DRIVE_ORDER = ['head'];
+
+// XR body joint hierarchy — needed to compute relative rotations
+const XR_PARENT = {
+  'spine-lower':      'hips',
+  'spine-middle':     'spine-lower',
+  'spine-upper':      'spine-middle',
+  'neck':             'spine-upper',
+  'head':             'neck',
+  'left-shoulder':    'spine-upper',
+  'left-arm-upper':   'left-shoulder',
+  'left-arm-lower':   'left-arm-upper',
+  'left-hand-wrist':  'left-arm-lower',
+  'right-shoulder':   'spine-upper',
+  'right-arm-upper':  'right-shoulder',
+  'right-arm-lower':  'right-arm-upper',
+  'right-hand-wrist': 'right-arm-lower',
+  'left-upper-leg':   'hips',
+  'left-lower-leg':   'left-upper-leg',
+  'left-foot-ankle':  'left-lower-leg',
+  'left-foot-ball':   'left-foot-ankle',
+  'right-upper-leg':  'hips',
+  'right-lower-leg':  'right-upper-leg',
+  'right-foot-ankle': 'right-lower-leg',
+  'right-foot-ball':  'right-foot-ankle',
+};
 
 // ============================================================
 // Scene
@@ -126,21 +147,21 @@ loader.load(
 
     vrm = gltf.userData.vrm;
 
-    // Rotate so character faces toward the user (+Z in VRM = forward, -Z in WebXR = forward)
-    VRMUtils.rotateVRM0(vrm); // handles VRM0/1 facing direction normalisation if needed
-    vrm.scene.rotation.y = Math.PI; // face toward -Z (toward user in WebXR)
+    // VRM1 characters face +Z by default.
+    // WebXR initial forward = -Z, mirror is at z = MIRROR_Z.
+    // Rotate 180° so character faces the mirror (-Z) and the user
+    // sees their avatar's front face reflected back.
+    vrm.scene.rotation.y = Math.PI;
 
     vrm.scene.visible = false;
     scene.add(vrm.scene);
 
-    // --- Mirror clone ---
-    // Clone the GLTF scene and re-register as a second VRM instance
+    // --- Mirror clone (second load) ---
     loader.load(VRM_URL, (gltf2) => {
       vrmMirror = gltf2.userData.vrm;
-      VRMUtils.rotateVRM0(vrmMirror);
       vrmMirror.scene.rotation.y = Math.PI;
       vrmMirror.scene.visible = false;
-      vrmMirror.scene.scale.set(1, 1, -1); // flip Z for mirror
+      vrmMirror.scene.scale.set(1, 1, -1); // Z-flip for mirror reflection
       scene.add(vrmMirror.scene);
     }, undefined, (err) => console.warn('Mirror VRM load failed:', err));
 
@@ -159,8 +180,25 @@ loader.load(
 // ============================================================
 // Body tracking → VRM humanoid
 // ============================================================
-const _parentInvQ = new THREE.Quaternion();
-const _xrQ = new THREE.Quaternion();
+// Correct approach: relative rotation.
+// VRM normalized bones have identity quaternion at T-pose.
+// The right value to set is how much the joint rotates relative
+// to its XR parent joint — not the raw world quaternion.
+//   bone.quaternion = xrParentQuat⁻¹ × xrJointQuat
+//
+// For the root (hips), there is no XR parent so we use world quat directly.
+
+const _jointQ  = new THREE.Quaternion();
+const _parentQ = new THREE.Quaternion();
+
+function getXRQuat(body, frame, refSpace, jointName) {
+  const space = body.get(jointName);
+  if (!space) return null;
+  const pose = frame.getPose(space, refSpace);
+  if (!pose) return null;
+  const q = pose.transform.orientation;
+  return new THREE.Quaternion(q.x, q.y, q.z, q.w);
+}
 
 function driveVRM(vrmInstance, body, frame, refSpace) {
   for (const xrJoint of BONE_DRIVE_ORDER) {
@@ -170,21 +208,22 @@ function driveVRM(vrmInstance, body, frame, refSpace) {
     const boneNode = vrmInstance.humanoid.getNormalizedBoneNode(boneName);
     if (!boneNode) continue;
 
-    const jointSpace = body.get(xrJoint);
-    if (!jointSpace) continue;
-    const pose = frame.getPose(jointSpace, refSpace);
-    if (!pose) continue;
+    const jointQuat = getXRQuat(body, frame, refSpace, xrJoint);
+    if (!jointQuat) continue;
 
-    const q = pose.transform.orientation;
-    _xrQ.set(q.x, q.y, q.z, q.w);
+    const parentXRJoint = XR_PARENT[xrJoint];
+    if (parentXRJoint) {
+      const parentQuat = getXRQuat(body, frame, refSpace, parentXRJoint);
+      if (parentQuat) {
+        // relative rotation: how much child rotates relative to parent in XR space
+        parentQuat.invert();
+        boneNode.quaternion.copy(parentQuat).multiply(jointQuat);
+        continue;
+      }
+    }
 
-    // bone.localQuat = parentWorldQuat⁻¹ × xrWorldQuat
-    // parent-first processing keeps parentWorldMatrix current.
-    boneNode.parent.getWorldQuaternion(_parentInvQ);
-    _parentInvQ.invert();
-    boneNode.quaternion.copy(_parentInvQ).multiply(_xrQ);
-
-    boneNode.updateWorldMatrix(false, false);
+    // Root bone (hips) — no XR parent, apply world quat directly
+    boneNode.quaternion.copy(jointQuat);
   }
 }
 
