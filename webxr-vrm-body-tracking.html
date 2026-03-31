@@ -210,7 +210,10 @@ function getXRQuat(body, frame, refSpace, jointName) {
   return new THREE.Quaternion(q.x, q.y, q.z, q.w);
 }
 
-function driveVRM(vrmInstance, body, frame, refSpace) {
+// Debug state: per-joint status shown in HUD (only populated for main vrm, not mirror)
+const debugJointStatus = {};
+
+function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
   for (const xrJoint of BONE_DRIVE_ORDER) {
     const boneName = XR_TO_VRM[xrJoint];
     if (!boneName) continue;
@@ -219,20 +222,27 @@ function driveVRM(vrmInstance, body, frame, refSpace) {
     if (!boneNode) continue;
 
     const jointQuat = getXRQuat(body, frame, refSpace, xrJoint);
-    if (!jointQuat) continue;
+    if (!jointQuat) {
+      if (isMain) debugJointStatus[xrJoint] = '✗ null';
+      continue;
+    }
 
     const parentXRJoint = XR_PARENT[xrJoint];
     if (parentXRJoint) {
       const parentQuat = getXRQuat(body, frame, refSpace, parentXRJoint);
       if (parentQuat) {
-        // relative rotation: how much child rotates relative to parent in XR space
         parentQuat.invert();
-        boneNode.quaternion.copy(parentQuat).multiply(jointQuat);
+        const rel = parentQuat.multiply(jointQuat);
+        if (isMain) debugJointStatus[xrJoint] = `✓ w=${rel.w.toFixed(2)}`;
+        boneNode.quaternion.copy(rel);
         continue;
+      } else {
+        if (isMain) debugJointStatus[xrJoint] = `✗ parent(${parentXRJoint}) null`;
       }
     }
 
-    // Root bone (hips) — no XR parent, apply world quat directly
+    // Root or parent unavailable — use world quat
+    if (isMain) debugJointStatus[xrJoint] = `✓ world w=${jointQuat.w.toFixed(2)}`;
     boneNode.quaternion.copy(jointQuat);
   }
 }
@@ -254,7 +264,7 @@ function updateVRMFromBody(frame, refSpace) {
     }
   }
 
-  driveVRM(vrm, body, frame, refSpace);
+  driveVRM(vrm, body, frame, refSpace, true);
 
   // Mirror
   if (vrmMirror) {
@@ -264,7 +274,7 @@ function updateVRMFromBody(frame, refSpace) {
       vrm.scene.position.y,
       2 * MIRROR_Z - vrm.scene.position.z
     );
-    driveVRM(vrmMirror, body, frame, refSpace);
+    driveVRM(vrmMirror, body, frame, refSpace, false);
   }
 
   return true;
@@ -274,12 +284,12 @@ function updateVRMFromBody(frame, refSpace) {
 // HUD
 // ============================================================
 const hudCanvas = document.createElement('canvas');
-hudCanvas.width = 400; hudCanvas.height = 100;
+hudCanvas.width = 512; hudCanvas.height = 300;
 const hudCtx = hudCanvas.getContext('2d');
 const hudTexture = new THREE.CanvasTexture(hudCanvas);
 const hudMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.3, 0.075),
-  new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.85 })
+  new THREE.PlaneGeometry(0.45, 0.26),
+  new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.9 })
 );
 hudMesh.position.set(0, 1.8, -1.0);
 scene.add(hudMesh);
@@ -288,22 +298,26 @@ let jointCount = 0;
 
 function drawHUD() {
   const ctx = hudCtx;
-  ctx.clearRect(0, 0, 400, 100);
-  ctx.fillStyle = 'rgba(10,10,20,0.7)';
-  ctx.beginPath(); ctx.roundRect(0, 0, 400, 100, 10); ctx.fill();
+  ctx.clearRect(0, 0, 512, 300);
+  ctx.fillStyle = 'rgba(10,10,20,0.85)';
+  ctx.beginPath(); ctx.roundRect(0, 0, 512, 300, 10); ctx.fill();
 
   ctx.fillStyle = jointCount > 0 ? '#44ff88' : '#ff4444';
-  ctx.font = 'bold 20px monospace';
+  ctx.font = 'bold 18px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText(jointCount > 0 ? 'Body Tracking Active' : 'No Body Tracking', 200, 30);
+  ctx.fillText(jointCount > 0 ? 'Body Tracking Active' : 'No Body Tracking', 256, 24);
 
-  ctx.fillStyle = '#888';
-  ctx.font = '14px monospace';
-  ctx.fillText(`Joints tracked: ${jointCount}`, 200, 55);
-
-  ctx.fillStyle = '#666';
-  ctx.font = '11px sans-serif';
-  ctx.fillText('chrome://flags → WebXR Experiments', 200, 80);
+  // Per-joint status
+  ctx.font = '13px monospace';
+  ctx.textAlign = 'left';
+  let y = 50;
+  for (const joint of BONE_DRIVE_ORDER) {
+    const status = debugJointStatus[joint] || '…';
+    const ok = status.startsWith('✓');
+    ctx.fillStyle = ok ? '#44ff88' : '#ff6644';
+    ctx.fillText(`${joint}: ${status}`, 12, y);
+    y += 20;
+  }
 
   hudTexture.needsUpdate = true;
 }
