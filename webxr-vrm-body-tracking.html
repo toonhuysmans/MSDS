@@ -236,6 +236,51 @@ function getXRQuat(body, frame, refSpace, jointName) {
   return new THREE.Quaternion(q.x, q.y, q.z, q.w);
 }
 
+function getXRPose(body, frame, refSpace, jointName) {
+  const space = body.get(jointName);
+  if (!space) return null;
+  return frame.getPose(space, refSpace);
+}
+
+// ============================================================
+// CSV recording
+// ============================================================
+// Columns: frame, timestamp_ms, joint, calibrated,
+//          xr_px,xr_py,xr_pz, xr_qx,xr_qy,xr_qz,xr_qw,
+//          vrm_qx,vrm_qy,vrm_qz,vrm_qw
+const CSV_HEADER = 'frame,timestamp_ms,joint,calibrated,' +
+  'xr_px,xr_py,xr_pz,xr_qx,xr_qy,xr_qz,xr_qw,' +
+  'vrm_qx,vrm_qy,vrm_qz,vrm_qw';
+const MAX_RECORD_FRAMES = 300;
+
+let isRecording = false;
+let csvRows = [];       // string rows accumulated during recording
+let csvFrameNum = 0;
+let leftThumbWasPressed = false;
+
+function toggleRecording() {
+  if (!isRecording) {
+    csvRows = [];
+    csvFrameNum = 0;
+    isRecording = true;
+    console.log('CSV recording started');
+  } else {
+    isRecording = false;
+    downloadCSV();
+  }
+}
+
+function downloadCSV() {
+  const blob = new Blob([CSV_HEADER + '\n' + csvRows.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `vrm-tracking-${Date.now()}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  console.log(`CSV downloaded: ${csvRows.length} rows`);
+}
+
 function captureTPose(body, frame, refSpace) {
   let n = 0;
   for (const name of CAL_JOINTS) {
@@ -250,6 +295,7 @@ function captureTPose(body, frame, refSpace) {
 const debugJointStatus = {};
 
 function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
+  const ts = performance.now().toFixed(2);
   for (const xrJoint of BONE_DRIVE_ORDER) {
     const boneName = XR_TO_VRM[xrJoint];
     if (!boneName) continue;
@@ -263,42 +309,54 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
       continue;
     }
 
+    let finalQuat = null;
+
     const parentXRJoint = XR_PARENT[xrJoint];
     if (parentXRJoint) {
       const parentQuat = getXRQuat(body, frame, refSpace, parentXRJoint);
       if (parentQuat) {
-        // Raw relative rotation: how much child rotated vs parent in world space
         const rel = parentQuat.clone().invert().multiply(jointQuat);
-
         if (isCalibrated && calibRest[parentXRJoint] && calibRest[xrJoint]) {
-          // T-pose relative rotation (constant offset at rest)
           const restRel = calibRest[parentXRJoint].clone().invert().multiply(calibRest[xrJoint]);
-          // Subtract T-pose offset → pure delta from T-pose = what VRM needs
           const corrected = restRel.invert().multiply(rel);
-          // Meta's body tracking uses mirrored joint coordinate frames for the
-          // left side — the delta rotation comes out as the conjugate (inverse)
-          // of what VRM expects. Conjugate to correct it.
           if (xrJoint.startsWith('left-')) corrected.conjugate();
           if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
-          boneNode.quaternion.copy(corrected);
+          finalQuat = corrected;
         } else {
           if (isMain) debugJointStatus[xrJoint] = `~raw w=${rel.w.toFixed(2)}`;
-          boneNode.quaternion.copy(rel);
+          finalQuat = rel;
         }
-        continue;
       } else {
         if (isMain) debugJointStatus[xrJoint] = `✗ parent(${parentXRJoint}) null`;
       }
+    } else {
+      // Root joint (hips) — world quat with calibration offset
+      if (isCalibrated && calibRest[xrJoint]) {
+        const corrected = calibRest[xrJoint].clone().invert().multiply(jointQuat);
+        if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
+        finalQuat = corrected;
+      } else {
+        if (isMain) debugJointStatus[xrJoint] = `✓ world w=${jointQuat.w.toFixed(2)}`;
+        finalQuat = jointQuat;
+      }
     }
 
-    // Root joint (hips) or parent unavailable — world quat with calibration offset
-    if (isCalibrated && calibRest[xrJoint]) {
-      const corrected = calibRest[xrJoint].clone().invert().multiply(jointQuat);
-      if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
-      boneNode.quaternion.copy(corrected);
-    } else {
-      if (isMain) debugJointStatus[xrJoint] = `✓ world w=${jointQuat.w.toFixed(2)}`;
-      boneNode.quaternion.copy(jointQuat);
+    if (!finalQuat) continue;
+    boneNode.quaternion.copy(finalQuat);
+
+    // CSV recording — only for main VRM, one row per joint per frame
+    if (isMain && isRecording) {
+      const xrp = getXRPose(body, frame, refSpace, xrJoint);
+      const p = xrp ? xrp.transform.position : null;
+      const q = jointQuat;
+      const v = finalQuat;
+      const n = (x) => x != null ? x.toFixed(6) : '';
+      csvRows.push(
+        `${csvFrameNum},${ts},${xrJoint},${isCalibrated ? 1 : 0},` +
+        `${n(p?.x)},${n(p?.y)},${n(p?.z)},` +
+        `${n(q.x)},${n(q.y)},${n(q.z)},${n(q.w)},` +
+        `${n(v.x)},${n(v.y)},${n(v.z)},${n(v.w)}`
+      );
     }
   }
 }
@@ -351,6 +409,13 @@ function drawHUD() {
   ctx.textAlign = 'center';
   ctx.fillStyle = jointCount > 0 ? '#44ff88' : '#ff4444';
   ctx.fillText(jointCount > 0 ? 'Body Tracking Active' : 'No Body Tracking', 256, 24);
+
+  // Recording status
+  if (isRecording) {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText(`⏺ REC  frame ${csvFrameNum}/${MAX_RECORD_FRAMES}  (left thumbstick to stop)`, 256, 44);
+  }
 
   // Calibration status row
   ctx.font = '13px monospace';
@@ -444,7 +509,7 @@ renderer.setAnimationLoop((timestamp, frame) => {
   if (frame && renderer.xr.isPresenting) {
     refSpace = renderer.xr.getReferenceSpace();
 
-    // Right thumbstick press starts 3-second T-pose countdown
+    // Controller inputs: right thumbstick = calibrate, left thumbstick = record
     if (xrSession) {
       for (const src of xrSession.inputSources) {
         if (src.handedness === 'right' && src.gamepad) {
@@ -454,6 +519,11 @@ renderer.setAnimationLoop((timestamp, frame) => {
             isCalibrated = false;
           }
           thumbstickWasPressed = pressed;
+        }
+        if (src.handedness === 'left' && src.gamepad) {
+          const pressed = src.gamepad.buttons[3]?.pressed ?? false;
+          if (pressed && !leftThumbWasPressed) toggleRecording();
+          leftThumbWasPressed = pressed;
           break;
         }
       }
@@ -466,6 +536,15 @@ renderer.setAnimationLoop((timestamp, frame) => {
     }
 
     updateVRMFromBody(frame, refSpace);
+
+    // CSV recording frame management
+    if (isRecording) {
+      csvFrameNum++;
+      if (csvFrameNum >= MAX_RECORD_FRAMES) {
+        isRecording = false;
+        downloadCSV();
+      }
+    }
 
     // Count tracked joints for HUD
     jointCount = 0;
