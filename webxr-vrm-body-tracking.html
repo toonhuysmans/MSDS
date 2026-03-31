@@ -39,10 +39,38 @@
 <div id="loading">Loading VRM model...</div>
 <button id="enterVR" disabled>Enter VR</button>
 
+<!-- WebXR capability check runs immediately, independent of CDN module imports.
+     If the module script fails (e.g. CDN unreachable), the button still reflects
+     whether VR is actually supported on this device. -->
+<script>
+(function() {
+  const btn = document.getElementById('enterVR');
+  if (!navigator.xr) {
+    btn.textContent = 'WebXR Not Available';
+    return;
+  }
+  navigator.xr.isSessionSupported('immersive-vr').then(function(supported) {
+    if (supported) {
+      btn.disabled = false;
+    } else {
+      btn.textContent = 'VR Not Supported';
+    }
+  }).catch(function(e) {
+    btn.textContent = 'XR check failed';
+    console.error('isSessionSupported error:', e);
+  });
+})();
+</script>
+
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMHumanBoneName } from '@pixiv/three-vrm';
+
+window.addEventListener('error', (e) => {
+  document.getElementById('loading').textContent = 'Script error: ' + e.message;
+  document.getElementById('loading').style.display = 'block';
+});
 
 // ============================================================
 // CONFIG
@@ -398,18 +426,6 @@ drawHUD();
 // WebXR session
 // ============================================================
 const enterBtn = document.getElementById('enterVR');
-
-if (navigator.xr) {
-  navigator.xr.isSessionSupported('immersive-vr').then(supported => {
-    if (supported) {
-      enterBtn.disabled = false;
-    } else {
-      enterBtn.textContent = 'VR Not Supported';
-    }
-  });
-} else {
-  enterBtn.textContent = 'WebXR Not Available';
-}
 
 let xrSession = null;
 let refSpace = null;
