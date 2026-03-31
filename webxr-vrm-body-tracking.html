@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebXR VRM Body Tracking</title>
+<style>
+  body { margin: 0; background: #111; color: #fff; font-family: sans-serif; overflow: hidden; }
+  #enterVR {
+    position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
+    padding: 16px 32px; font-size: 18px; background: #44aaff; color: #000;
+    border: none; border-radius: 8px; cursor: pointer; z-index: 10;
+  }
+  #enterVR:disabled { opacity: 0.4; cursor: default; }
+  #info {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    text-align: center; opacity: 0.7; font-size: 14px; max-width: 500px;
+  }
+  #loading {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    font-size: 20px; opacity: 0.6;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2/lib/three-vrm.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="info">
+  WebXR VRM Body Tracking — Quest 3<br>
+  <small>Requires: Quest Browser → chrome://flags → enable "WebXR Experiments"</small>
+</div>
+<div id="loading">Loading VRM model...</div>
+<button id="enterVR" disabled>Enter VR</button>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMHumanBoneName, VRMUtils } from '@pixiv/three-vrm';
+
+// ============================================================
+// CONFIG
+// ============================================================
+// Replace with your own VRM from VRoid Hub for a custom avatar
+const VRM_URL = 'https://raw.githubusercontent.com/pixiv/three-vrm/dev/packages/three-vrm/examples/models/VRM1_Constraint_Twist_Sample.vrm';
+const MIRROR_Z = -2.0;  // Z position of the mirror wall
+
+// ============================================================
+// XR body joint → VRM humanoid bone name
+// ============================================================
+const XR_TO_VRM = {
+  'hips':             VRMHumanBoneName.Hips,
+  'spine-lower':      VRMHumanBoneName.Spine,
+  'spine-middle':     VRMHumanBoneName.Chest,
+  'spine-upper':      VRMHumanBoneName.UpperChest,
+  'neck':             VRMHumanBoneName.Neck,
+  'head':             VRMHumanBoneName.Head,
+  'left-shoulder':    VRMHumanBoneName.LeftShoulder,
+  'left-arm-upper':   VRMHumanBoneName.LeftUpperArm,
+  'left-arm-lower':   VRMHumanBoneName.LeftLowerArm,
+  'left-hand-wrist':  VRMHumanBoneName.LeftHand,
+  'right-shoulder':   VRMHumanBoneName.RightShoulder,
+  'right-arm-upper':  VRMHumanBoneName.RightUpperArm,
+  'right-arm-lower':  VRMHumanBoneName.RightLowerArm,
+  'right-hand-wrist': VRMHumanBoneName.RightHand,
+  'left-upper-leg':   VRMHumanBoneName.LeftUpperLeg,
+  'left-lower-leg':   VRMHumanBoneName.LeftLowerLeg,
+  'left-foot-ankle':  VRMHumanBoneName.LeftFoot,
+  'left-foot-ball':   VRMHumanBoneName.LeftToes,
+  'right-upper-leg':  VRMHumanBoneName.RightUpperLeg,
+  'right-lower-leg':  VRMHumanBoneName.RightLowerLeg,
+  'right-foot-ankle': VRMHumanBoneName.RightFoot,
+  'right-foot-ball':  VRMHumanBoneName.RightToes,
+};
+
+// Drive in parent-first order so getWorldQuaternion() is always current
+const BONE_DRIVE_ORDER = [
+  'hips', 'spine-lower', 'spine-middle', 'spine-upper', 'neck', 'head',
+  'left-shoulder',  'left-arm-upper',  'left-arm-lower',  'left-hand-wrist',
+  'right-shoulder', 'right-arm-upper', 'right-arm-lower', 'right-hand-wrist',
+  'left-upper-leg',  'left-lower-leg',  'left-foot-ankle',  'left-foot-ball',
+  'right-upper-leg', 'right-lower-leg', 'right-foot-ankle', 'right-foot-ball',
+];
+
+// ============================================================
+// Scene
+// ============================================================
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+camera.position.set(0, 1.6, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+dirLight.position.set(2, 4, 3);
+scene.add(dirLight);
+
+scene.add(new THREE.GridHelper(20, 40, 0x333333, 0x222222));
+
+// ============================================================
+// Mirror wall
+// ============================================================
+const mirrorSurface = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2.5),
+  new THREE.MeshStandardMaterial({
+    color: 0x667788, roughness: 0.05, metalness: 0.9,
+    transparent: true, opacity: 0.12, side: THREE.DoubleSide
+  })
+);
+mirrorSurface.position.set(0, 1.25, MIRROR_Z);
+scene.add(mirrorSurface);
+
+const frameMat = new THREE.MeshStandardMaterial({ color: 0x333344, roughness: 0.5, metalness: 0.3 });
+[[0, 2.52, 2.08, 0.04], [0, -0.02, 2.08, 0.04], [-1.04, 1.25, 0.04, 2.58], [1.04, 1.25, 0.04, 2.58]]
+  .forEach(([x, y, w, h]) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.04), frameMat);
+    m.position.set(x, y, MIRROR_Z);
+    scene.add(m);
+  });
+
+// ============================================================
+// Load VRM
+// ============================================================
+let vrm = null;
+let vrmMirror = null; // cloned scene for mirror reflection
+
+const loader = new GLTFLoader();
+loader.register(parser => new VRMLoaderPlugin(parser));
+
+loader.load(
+  VRM_URL,
+  (gltf) => {
+    document.getElementById('loading').style.display = 'none';
+
+    vrm = gltf.userData.vrm;
+
+    // Rotate so character faces toward the user (+Z in VRM = forward, -Z in WebXR = forward)
+    VRMUtils.rotateVRM0(vrm); // handles VRM0/1 facing direction normalisation if needed
+    vrm.scene.rotation.y = Math.PI; // face toward -Z (toward user in WebXR)
+
+    vrm.scene.visible = false;
+    scene.add(vrm.scene);
+
+    // --- Mirror clone ---
+    // Clone the GLTF scene and re-register as a second VRM instance
+    loader.load(VRM_URL, (gltf2) => {
+      vrmMirror = gltf2.userData.vrm;
+      VRMUtils.rotateVRM0(vrmMirror);
+      vrmMirror.scene.rotation.y = Math.PI;
+      vrmMirror.scene.visible = false;
+      vrmMirror.scene.scale.set(1, 1, -1); // flip Z for mirror
+      scene.add(vrmMirror.scene);
+    }, undefined, (err) => console.warn('Mirror VRM load failed:', err));
+
+    console.log('VRM loaded:', vrm);
+  },
+  (progress) => {
+    const pct = progress.total > 0 ? Math.round(progress.loaded / progress.total * 100) : '...';
+    document.getElementById('loading').textContent = `Loading VRM... ${pct}%`;
+  },
+  (err) => {
+    console.error('VRM load error:', err);
+    document.getElementById('loading').textContent = 'Failed to load VRM model';
+  }
+);
+
+// ============================================================
+// Body tracking → VRM humanoid
+// ============================================================
+const _parentInvQ = new THREE.Quaternion();
+const _xrQ = new THREE.Quaternion();
+
+function driveVRM(vrmInstance, body, frame, refSpace) {
+  for (const xrJoint of BONE_DRIVE_ORDER) {
+    const boneName = XR_TO_VRM[xrJoint];
+    if (!boneName) continue;
+
+    const boneNode = vrmInstance.humanoid.getNormalizedBoneNode(boneName);
+    if (!boneNode) continue;
+
+    const jointSpace = body.get(xrJoint);
+    if (!jointSpace) continue;
+    const pose = frame.getPose(jointSpace, refSpace);
+    if (!pose) continue;
+
+    const q = pose.transform.orientation;
+    _xrQ.set(q.x, q.y, q.z, q.w);
+
+    // bone.localQuat = parentWorldQuat⁻¹ × xrWorldQuat
+    // parent-first processing keeps parentWorldMatrix current.
+    boneNode.parent.getWorldQuaternion(_parentInvQ);
+    _parentInvQ.invert();
+    boneNode.quaternion.copy(_parentInvQ).multiply(_xrQ);
+
+    boneNode.updateWorldMatrix(false, false);
+  }
+}
+
+function updateVRMFromBody(frame, refSpace) {
+  const body = frame.body;
+  if (!body || !vrm) return false;
+
+  vrm.scene.visible = true;
+
+  // Position model: align model root so hips appear at tracked hips
+  const hipsSpace = body.get('hips');
+  if (hipsSpace) {
+    const hipsPose = frame.getPose(hipsSpace, refSpace);
+    if (hipsPose) {
+      const hp = hipsPose.transform.position;
+      // ~0.9 m = approximate hips height in VRM model space
+      vrm.scene.position.set(hp.x, hp.y - 0.9, hp.z);
+    }
+  }
+
+  driveVRM(vrm, body, frame, refSpace);
+
+  // Mirror
+  if (vrmMirror) {
+    vrmMirror.scene.visible = true;
+    vrmMirror.scene.position.set(
+      vrm.scene.position.x,
+      vrm.scene.position.y,
+      2 * MIRROR_Z - vrm.scene.position.z
+    );
+    driveVRM(vrmMirror, body, frame, refSpace);
+  }
+
+  return true;
+}
+
+// ============================================================
+// HUD
+// ============================================================
+const hudCanvas = document.createElement('canvas');
+hudCanvas.width = 400; hudCanvas.height = 100;
+const hudCtx = hudCanvas.getContext('2d');
+const hudTexture = new THREE.CanvasTexture(hudCanvas);
+const hudMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.3, 0.075),
+  new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.85 })
+);
+hudMesh.position.set(0, 1.8, -1.0);
+scene.add(hudMesh);
+
+let jointCount = 0;
+
+function drawHUD() {
+  const ctx = hudCtx;
+  ctx.clearRect(0, 0, 400, 100);
+  ctx.fillStyle = 'rgba(10,10,20,0.7)';
+  ctx.beginPath(); ctx.roundRect(0, 0, 400, 100, 10); ctx.fill();
+
+  ctx.fillStyle = jointCount > 0 ? '#44ff88' : '#ff4444';
+  ctx.font = 'bold 20px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(jointCount > 0 ? 'Body Tracking Active' : 'No Body Tracking', 200, 30);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '14px monospace';
+  ctx.fillText(`Joints tracked: ${jointCount}`, 200, 55);
+
+  ctx.fillStyle = '#666';
+  ctx.font = '11px sans-serif';
+  ctx.fillText('chrome://flags → WebXR Experiments', 200, 80);
+
+  hudTexture.needsUpdate = true;
+}
+drawHUD();
+
+// ============================================================
+// WebXR session
+// ============================================================
+const enterBtn = document.getElementById('enterVR');
+
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+    if (supported) {
+      enterBtn.disabled = false;
+    } else {
+      enterBtn.textContent = 'VR Not Supported';
+    }
+  });
+} else {
+  enterBtn.textContent = 'WebXR Not Available';
+}
+
+let xrSession = null;
+let refSpace = null;
+
+enterBtn.addEventListener('click', async () => {
+  if (xrSession) return;
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['body-tracking', 'local-floor', 'bounded-floor', 'hand-tracking']
+    });
+    xrSession = session;
+    const gl = renderer.getContext();
+    const glLayer = new XRWebGLLayer(session, gl, {
+      framebufferScaleFactor: XRWebGLLayer.getNativeFramebufferScaleFactor(session),
+      antialias: true,
+    });
+    session.updateRenderState({ baseLayer: glLayer });
+    renderer.xr.setSession(session);
+    session.addEventListener('end', () => { xrSession = null; });
+    enterBtn.textContent = 'In VR';
+  } catch (e) {
+    console.error('Failed to start VR session:', e);
+    enterBtn.textContent = 'Error — see console';
+  }
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ============================================================
+// Render loop
+// ============================================================
+let prevTime = 0;
+
+renderer.setAnimationLoop((timestamp, frame) => {
+  const now = performance.now();
+  const dt = prevTime > 0 ? Math.min((now - prevTime) / 1000, 0.1) : 0.016;
+  prevTime = now;
+
+  if (frame && renderer.xr.isPresenting) {
+    refSpace = renderer.xr.getReferenceSpace();
+
+    updateVRMFromBody(frame, refSpace);
+
+    // Count tracked joints for HUD
+    jointCount = 0;
+    if (frame.body) {
+      for (const [, jointSpace] of frame.body) {
+        if (frame.getPose(jointSpace, refSpace)) jointCount++;
+      }
+    }
+    drawHUD();
+  }
+
+  // VRM update: applies normalized pose to actual skeleton, spring bones, etc.
+  if (vrm) vrm.update(dt);
+  if (vrmMirror) vrmMirror.update(dt);
+
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
