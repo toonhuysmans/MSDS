@@ -54,14 +54,14 @@ const MIRROR_Z = -2.0;  // Z position of the mirror wall
 // ============================================================
 // XR body joint → VRM humanoid bone name
 // ============================================================
-// DEBUG: head only.
-// Using relative rotation: xrParentQuat⁻¹ × xrJointQuat
-// This maps the joint's rotation relative to its XR parent → VRM normalized bone local quat.
+// DEBUG: head + wrists.
 const XR_TO_VRM = {
-  'head': VRMHumanBoneName.Head,
+  'head':             VRMHumanBoneName.Head,
+  'left-hand-wrist':  VRMHumanBoneName.LeftHand,
+  'right-hand-wrist': VRMHumanBoneName.RightHand,
 };
 
-const BONE_DRIVE_ORDER = ['head'];
+const BONE_DRIVE_ORDER = ['head', 'left-hand-wrist', 'right-hand-wrist'];
 
 // XR body joint hierarchy — needed to compute relative rotations
 const XR_PARENT = {
