@@ -42,6 +42,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { Reflector } from 'three/addons/objects/Reflector.js';
 import { VRMLoaderPlugin, VRMHumanBoneName } from '@pixiv/three-vrm';
 
 // ============================================================
@@ -135,17 +136,17 @@ scene.add(dirLight);
 scene.add(new THREE.GridHelper(20, 40, 0x333333, 0x222222));
 
 // ============================================================
-// Mirror wall
+// Mirror wall — Reflector renders the scene from a reflected camera
+// so the mirror shows the real VRM pose, no second avatar needed.
 // ============================================================
-const mirrorSurface = new THREE.Mesh(
-  new THREE.PlaneGeometry(2, 2.5),
-  new THREE.MeshStandardMaterial({
-    color: 0x667788, roughness: 0.05, metalness: 0.9,
-    transparent: true, opacity: 0.12, side: THREE.DoubleSide
-  })
-);
-mirrorSurface.position.set(0, 1.25, MIRROR_Z);
-scene.add(mirrorSurface);
+const mirror = new Reflector(new THREE.PlaneGeometry(2, 2.5), {
+  clipBias: 0.003,
+  textureWidth: 1024,
+  textureHeight: 1024,
+  color: new THREE.Color(0x889999),
+});
+mirror.position.set(0, 1.25, MIRROR_Z);
+scene.add(mirror);
 
 const frameMat = new THREE.MeshStandardMaterial({ color: 0x333344, roughness: 0.5, metalness: 0.3 });
 [[0, 2.52, 2.08, 0.04], [0, -0.02, 2.08, 0.04], [-1.04, 1.25, 0.04, 2.58], [1.04, 1.25, 0.04, 2.58]]
@@ -158,8 +159,7 @@ const frameMat = new THREE.MeshStandardMaterial({ color: 0x333344, roughness: 0.
 // ============================================================
 // Load VRM
 // ============================================================
-let vrm = null;
-let vrmMirror = null; // cloned scene for mirror reflection
+let vrm = null; // cloned scene for mirror reflection
 
 const loader = new GLTFLoader();
 loader.register(parser => new VRMLoaderPlugin(parser));
@@ -177,23 +177,11 @@ loader.load(
     // sees their avatar's front face reflected back.
     vrm.scene.rotation.y = Math.PI;
 
-    // Disable lookAt — otherwise VRM internally rotates the head/eyes toward
-    // the camera, which differs between main and mirror (different positions
-    // relative to the camera), causing pose divergence.
+    // Disable lookAt so the VRM doesn't override head orientation toward the camera
     vrm.lookAt = undefined;
 
     vrm.scene.visible = false;
     scene.add(vrm.scene);
-
-    // --- Mirror clone (second load) ---
-    loader.load(VRM_URL, (gltf2) => {
-      vrmMirror = gltf2.userData.vrm;
-      vrmMirror.scene.rotation.y = Math.PI;
-      vrmMirror.scene.visible = false;
-      vrmMirror.scene.scale.set(1, 1, -1); // Z-flip for mirror reflection
-      vrmMirror.lookAt = undefined;
-      scene.add(vrmMirror.scene);
-    }, undefined, (err) => console.warn('Mirror VRM load failed:', err));
 
     console.log('VRM loaded:', vrm);
   },
@@ -305,16 +293,6 @@ function updateVRMFromBody(frame, refSpace) {
   }
 
   driveVRM(vrm, body, frame, refSpace, true);
-
-  // Mirror position
-  if (vrmMirror) {
-    vrmMirror.scene.visible = true;
-    vrmMirror.scene.position.set(
-      vrm.scene.position.x,
-      vrm.scene.position.y,
-      2 * MIRROR_Z - vrm.scene.position.z
-    );
-  }
 
   return true;
 }
@@ -472,17 +450,6 @@ renderer.setAnimationLoop((timestamp, frame) => {
 
   // VRM update: applies normalized pose to actual skeleton, spring bones, etc.
   if (vrm) vrm.update(dt);
-
-  // Copy all normalized bone states from main → mirror so they can't diverge.
-  // The mirror scene has scale.set(1,1,-1) which handles the Z-flip visually.
-  if (vrm && vrmMirror) {
-    for (const boneName of Object.values(VRMHumanBoneName)) {
-      const src = vrm.humanoid.getNormalizedBoneNode(boneName);
-      const dst = vrmMirror.humanoid.getNormalizedBoneNode(boneName);
-      if (src && dst) dst.quaternion.copy(src.quaternion);
-    }
-  }
-  if (vrmMirror) vrmMirror.update(dt);
 
   renderer.render(scene, camera);
 });
