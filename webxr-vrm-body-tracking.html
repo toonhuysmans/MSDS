@@ -261,7 +261,9 @@ const frameMat = new THREE.MeshStandardMaterial({ color: 0x333344, roughness: 0.
 // ============================================================
 // Load VRM
 // ============================================================
-let vrm = null; // cloned scene for mirror reflection
+let vrm = null;
+let vrmNaturalHeadY = 1.6;  // head bone Y in model space at T-pose (sampled at load)
+let vrmNaturalHipsY = 0.9;  // hips bone Y
 
 const loader = new GLTFLoader();
 loader.register(parser => new VRMLoaderPlugin(parser));
@@ -285,7 +287,13 @@ loader.load(
     vrm.scene.visible = false;
     scene.add(vrm.scene);
 
-    console.log('VRM loaded:', vrm);
+    // Sample natural T-pose bone heights (Y is unaffected by the PI Y-rotation)
+    const _tv = new THREE.Vector3();
+    vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Head).getWorldPosition(_tv);
+    vrmNaturalHeadY = _tv.y;
+    vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Hips).getWorldPosition(_tv);
+    vrmNaturalHipsY = _tv.y;
+    console.log('VRM loaded — headY:', vrmNaturalHeadY.toFixed(3), 'hipsY:', vrmNaturalHipsY.toFixed(3));
   },
   (progress) => {
     const pct = progress.total > 0 ? Math.round(progress.loaded / progress.total * 100) : '...';
@@ -407,6 +415,24 @@ function captureTPose(body, frame, refSpace, inputSources) {
     }
   }
   isCalibrated = n > 0;
+
+  // Scale VRM to match real person's height (viewer Y = headset ≈ head height)
+  if (vrm && isCalibrated) {
+    const viewerPose = frame.getViewerPose(refSpace);
+    const hipsSpace = body.get('hips');
+    if (viewerPose && hipsSpace) {
+      const hipsPose = frame.getPose(hipsSpace, refSpace);
+      if (hipsPose) {
+        const realSpan = viewerPose.transform.position.y - hipsPose.transform.position.y;
+        const vrmSpan  = vrmNaturalHeadY - vrmNaturalHipsY;
+        if (realSpan > 0.1 && vrmSpan > 0.01) {
+          vrm.scene.scale.setScalar(realSpan / vrmSpan);
+          console.log(`Height scale: ${(realSpan/vrmSpan).toFixed(3)} (real span: ${realSpan.toFixed(3)} m)`);
+        }
+      }
+    }
+  }
+
   console.log(`T-pose captured: ${n} joints (body + fingers)`);
 }
 
@@ -537,8 +563,7 @@ function updateVRMFromBody(frame, refSpace, inputSources) {
     const hipsPose = frame.getPose(hipsSpace, refSpace);
     if (hipsPose) {
       const hp = hipsPose.transform.position;
-      // ~0.9 m = approximate hips height in VRM model space
-      vrm.scene.position.set(hp.x, hp.y - 0.9, hp.z);
+      vrm.scene.position.set(hp.x, hp.y - vrmNaturalHipsY * vrm.scene.scale.y, hp.z);
     }
   }
 
@@ -589,39 +614,32 @@ function drawHUD() {
   ctx.font = '13px monospace';
   const remaining = calibCountdownEnd > 0
     ? Math.ceil((calibCountdownEnd - performance.now()) / 1000) : 0;
-  const calibTrigger = usingHandTracking ? 'R PINCH' : 'R THUMBSTICK';
-  const recTrigger   = usingHandTracking ? 'L PINCH'  : 'L THUMBSTICK';
   if (remaining > 0) {
     ctx.fillStyle = '#ffdd00';
     ctx.fillText(`Arms OUT, fingers open — calibrating in ${remaining}…`, 256, 44);
   } else if (isCalibrated) {
     ctx.fillStyle = '#44ff88';
-    ctx.fillText(`T-pose calibrated ✓  (${calibTrigger} to redo)`, 256, 44);
+    ctx.fillText('T-pose calibrated ✓  (R-stick to redo)', 256, 44);
   } else {
     ctx.fillStyle = '#ffaa44';
-    ctx.fillText(`Spread arms & fingers → ${calibTrigger}`, 256, 44);
+    ctx.fillText('Spread arms & fingers → press R THUMBSTICK', 256, 44);
   }
 
   // Recording status
   if (isRecording) {
     ctx.fillStyle = '#ff4444';
     ctx.font = 'bold 13px monospace';
-    ctx.fillText(`⏺ REC  ${csvFrameNum}/${MAX_RECORD_FRAMES}  (${recTrigger} to stop)`, 256, 60);
+    ctx.fillText(`⏺ REC  ${csvFrameNum}/${MAX_RECORD_FRAMES}  (L-stick to stop)`, 256, 60);
   }
 
-  // Input mode + controller button debug
+  // Controller button debug
   ctx.font = '11px monospace';
   ctx.textAlign = 'left';
-  if (usingHandTracking) {
-    ctx.fillStyle = '#aaffaa';
-    ctx.fillText('Input: hand tracking  (pinch = action)', 12, 76);
-  } else {
-    const rBtns = debugBtnsR.map((v,i) => v ? `[${i}]` : `${i}`).join(' ');
-    const lBtns = debugBtnsL.map((v,i) => v ? `[${i}]` : `${i}`).join(' ');
-    ctx.fillStyle = '#aaaaff';
-    ctx.fillText(`R-ctrl: ${rBtns || 'none'}`, 12, 76);
-    ctx.fillText(`L-ctrl: ${lBtns || 'none'}`, 12, 90);
-  }
+  const rBtns = debugBtnsR.map((v,i) => v ? `[${i}]` : `${i}`).join(' ');
+  const lBtns = debugBtnsL.map((v,i) => v ? `[${i}]` : `${i}`).join(' ');
+  ctx.fillStyle = usingHandTracking ? '#aaffaa' : '#aaaaff';
+  ctx.fillText(usingHandTracking ? 'Hands active' : `R: ${rBtns || 'none'}`, 12, 76);
+  if (!usingHandTracking) ctx.fillText(`L: ${lBtns || 'none'}`, 12, 90);
 
   // Per-joint status
   ctx.font = '11px monospace';
@@ -700,25 +718,23 @@ renderer.setAnimationLoop((timestamp, frame) => {
   if (frame && renderer.xr.isPresenting) {
     refSpace = renderer.xr.getReferenceSpace();
 
-    // Input: controllers use thumbstick (btn 3); hand tracking uses pinch (distance-based)
+    // Input: right thumbstick = calibrate, left thumbstick = record (controllers only)
     if (xrSession) {
       usingHandTracking = false;
       for (const src of xrSession.inputSources) {
-        const isHand = !!src.hand;
-        if (isHand) usingHandTracking = true;
-        // Pinch for hands (distance), thumbstick press for controllers
-        const pressed = isHand
-          ? detectHandPinch(src.hand, frame, refSpace)
-          : (src.gamepad?.buttons[3]?.pressed ?? false);
+        if (src.hand) { usingHandTracking = true; continue; }
+        if (!src.gamepad) continue;
         if (src.handedness === 'right') {
-          if (!isHand) debugBtnsR = src.gamepad?.buttons.map(b => b.pressed) ?? [];
+          debugBtnsR = src.gamepad.buttons.map(b => b.pressed);
+          const pressed = src.gamepad.buttons[3]?.pressed ?? false;
           if (pressed && !thumbstickWasPressed && calibCountdownEnd === 0) {
             calibCountdownEnd = performance.now() + 3000;
             isCalibrated = false;
           }
           thumbstickWasPressed = pressed;
         } else if (src.handedness === 'left') {
-          if (!isHand) debugBtnsL = src.gamepad?.buttons.map(b => b.pressed) ?? [];
+          debugBtnsL = src.gamepad.buttons.map(b => b.pressed);
+          const pressed = src.gamepad.buttons[3]?.pressed ?? false;
           if (pressed && !leftThumbWasPressed) toggleRecording();
           leftThumbWasPressed = pressed;
         }
