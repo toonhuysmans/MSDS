@@ -138,6 +138,33 @@ function yToGain(y) {
   return Math.max(0, Math.min(1, (y - VOL_Y_MIN) / (VOL_Y_MAX - VOL_Y_MIN)));
 }
 
+// ─── Scale quantization ───────────────────────────────────────────────────────
+// Intervals in semitones from A (440 Hz = 0). Cycle FREE → MAJOR → MINOR → PENTA.
+const SCALE_DEFS = {
+  FREE:  null,
+  MAJOR: [0, 2, 4, 5, 7, 9, 11],   // A major
+  MINOR: [0, 2, 3, 5, 7, 8, 10],   // A natural minor
+  PENTA: [0, 2, 4, 7, 9],           // A major pentatonic
+};
+const SCALE_NAMES = Object.keys(SCALE_DEFS); // ['FREE','MAJOR','MINOR','PENTA']
+let scaleIndex = 0;
+
+function quantizeFreq(freq) {
+  const intervals = SCALE_DEFS[SCALE_NAMES[scaleIndex]];
+  if (!intervals) return freq;
+  const semitones = 12 * Math.log2(freq / 440);
+  const octave = Math.round(semitones / 12);
+  let best = semitones, bestDist = Infinity;
+  for (let oct = octave - 1; oct <= octave + 1; oct++) {
+    for (const iv of intervals) {
+      const candidate = oct * 12 + iv;
+      const dist = Math.abs(candidate - semitones);
+      if (dist < bestDist) { bestDist = dist; best = candidate; }
+    }
+  }
+  return 440 * Math.pow(2, best / 12);
+}
+
 // Note name from frequency
 function freqToNote(freq) {
   const NOTE_NAMES = ['A','A#','B','C','C#','D','D#','E','F','F#','G','G#'];
@@ -220,6 +247,36 @@ const stripeMat = new THREE.MeshStandardMaterial({ color: 0x9944ff, emissive: 0x
 const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.73, 0.012, 0.02), stripeMat);
 stripe.position.set(0, STAND_Y + 0.04, STAND_Z - 0.13);
 scene.add(stripe);
+
+// ─── Scale toggle switch (front-center of stand) ─────────────────────────
+const switchCanvas = document.createElement('canvas');
+switchCanvas.width = 128; switchCanvas.height = 48;
+const switchCtx = switchCanvas.getContext('2d');
+const switchTex = new THREE.CanvasTexture(switchCanvas);
+const switchButtonMat = new THREE.MeshStandardMaterial({
+  roughness: 0.3, metalness: 0.5, map: switchTex,
+  emissive: new THREE.Color(0x110022), emissiveIntensity: 1
+});
+const switchMesh = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.025, 0.045), switchButtonMat);
+switchMesh.position.set(0, STAND_Y + 0.062, STAND_Z - 0.105);
+scene.add(switchMesh);
+
+function updateSwitchVisual() {
+  const ctx = switchCtx;
+  ctx.clearRect(0, 0, 128, 48);
+  const name = SCALE_NAMES[scaleIndex];
+  const isFree = name === 'FREE';
+  ctx.fillStyle = isFree ? '#1a0a2e' : '#0a1e14';
+  ctx.fillRect(0, 0, 128, 48);
+  ctx.fillStyle = isFree ? '#cc66ff' : '#44ffaa';
+  ctx.font = 'bold 20px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(name, 64, 24);
+  switchTex.needsUpdate = true;
+  switchButtonMat.emissive.set(isFree ? 0x110022 : 0x003311);
+}
+updateSwitchVisual();
 
 // ─── Pitch antenna — vertical rod on the RIGHT ────────────────────────────
 // Like a real theremin: player's right hand moves LEFT/RIGHT toward/away from the rod.
@@ -549,7 +606,7 @@ function updateHand(src, frame, refSpace) {
       if (jointName === 'wrist') {
         wristP = p;
       } else if (jointName === 'index-finger-tip') {
-        tipPos = { x: p.x, y: p.y };
+        tipPos = { x: p.x, y: p.y, z: p.z };
         orb.position.set(p.x, p.y, p.z);
         orb.visible = true;
       }
@@ -619,6 +676,7 @@ window.addEventListener('resize', () => {
 // ─── Render loop ─────────────────────────────────────────────────────────────
 const _tmpColor = new THREE.Color();
 let time = 0;
+let switchCooldown = 0; // seconds until switch can be triggered again
 
 renderer.setAnimationLoop((timestamp, frame) => {
   time += 0.016;
@@ -646,6 +704,22 @@ renderer.setAnimationLoop((timestamp, frame) => {
       }
     }
 
+    // ── Scale switch touch detection ──
+    switchCooldown -= 0.016;
+    if (switchCooldown <= 0) {
+      const sw = switchMesh.position;
+      for (const hand of [rightWrist, leftWrist]) {
+        if (!hand) continue;
+        const dist = Math.hypot(hand.x - sw.x, hand.y - sw.y, hand.z - sw.z);
+        if (dist < 0.045) {
+          scaleIndex = (scaleIndex + 1) % SCALE_NAMES.length;
+          updateSwitchVisual();
+          switchCooldown = 0.6;
+          break;
+        }
+      }
+    }
+
     // Hide orbs if not tracked
     if (!rightTracked) { for (const m of Object.values(rightMeshes)) m.visible = false; rightOrb.visible = false; }
     if (!leftTracked)  { for (const m of Object.values(leftMeshes))  m.visible = false; leftOrb.visible = false; }
@@ -656,8 +730,8 @@ renderer.setAnimationLoop((timestamp, frame) => {
       const smoothTime = 0.05; // 50ms — slight portamento glide
 
       if (rightTracked && rightWrist !== null) {
-        // Pitch: right index fingertip X → frequency
-        const targetFreq = xToFreq(rightWrist.x);
+        // Pitch: right index fingertip X → frequency, optionally quantized
+        const targetFreq = quantizeFreq(xToFreq(rightWrist.x));
         currentFreq = targetFreq;
         oscillator.frequency.setTargetAtTime(targetFreq, now, smoothTime);
 
