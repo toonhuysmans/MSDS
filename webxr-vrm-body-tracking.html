@@ -605,7 +605,7 @@ const hudMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(0.25, 0.27),
   new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.75 })
 );
-hudMesh.position.set(0, 1.8, -1.0);
+hudMesh.position.set(1.35, 1.5, MIRROR_Z);  // right side of mirror, same depth
 hudMesh.scale.set(1, 600/560, 1);
 scene.add(hudMesh);
 
