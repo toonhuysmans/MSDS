@@ -588,14 +588,17 @@ function updateVRMFromBody(frame, refSpace, inputSources) {
     }
   }
 
-  driveVRM(vrm, body, frame, refSpace, true);
+  const pose = {};
+  driveVRM(body, frame, refSpace, true, pose);
 
   // Drive finger bones from hand tracking
   if (inputSources) {
     for (const src of inputSources) {
-      if (src.hand) driveVRMFingers(vrm, frame, refSpace, src.handedness, src.hand);
+      if (src.hand) driveVRMFingers(frame, refSpace, src.handedness, src.hand, pose);
     }
   }
+
+  vrm.humanoid.setNormalizedPose(pose);
 
   // Ground: after all bones are driven, shift scene so the lowest foot bone sits at y=0
   vrm.scene.updateMatrixWorld(true);
