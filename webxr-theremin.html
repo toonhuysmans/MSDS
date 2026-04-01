@@ -103,21 +103,22 @@ function initAudio() {
   }, 1500);
 }
 
-// Pitch: right hand Y → frequency (110 Hz – 880 Hz, two octaves)
-// ~30cm of movement covers the full range
-const PITCH_Y_MIN = 0.85; // just below waist
-const PITCH_Y_MAX = 1.15; // just above waist
+// Pitch: right hand X → frequency  (real theremin: hand moves toward/away from vertical rod)
+// Antenna is at x=+PITCH_X_ANTENNA. Closer (higher X) = higher pitch.
+// ~20cm horizontal sweep covers the full range.
+const PITCH_X_ANTENNA = 0.36; // x position of pitch rod
+const PITCH_X_FAR  = 0.08;   // right hand far left  → lowest pitch
+const PITCH_X_NEAR = 0.34;   // right hand near rod  → highest pitch
 const FREQ_MIN = 110;
 const FREQ_MAX = 880;
 
-// Volume: left hand Y → gain
-// ~30cm of movement covers full range
-const VOL_Y_MIN  = 0.75;
-const VOL_Y_MAX  = 1.05;
+// Volume: left hand Y → gain  (real theremin: hand height above volume loop)
+// ~20cm vertical sweep covers full range.
+const VOL_Y_MIN = 0.82;  // hand low  → silent
+const VOL_Y_MAX = 1.02;  // hand high → full volume
 
-function yToFreq(y) {
-  const t = Math.max(0, Math.min(1, (y - PITCH_Y_MIN) / (PITCH_Y_MAX - PITCH_Y_MIN)));
-  // Exponential mapping for musical pitch perception
+function xToFreq(x) {
+  const t = Math.max(0, Math.min(1, (x - PITCH_X_FAR) / (PITCH_X_NEAR - PITCH_X_FAR)));
   return FREQ_MIN * Math.pow(FREQ_MAX / FREQ_MIN, t);
 }
 
@@ -209,47 +210,39 @@ stripe.position.set(0, STAND_Y + 0.04, STAND_Z - 0.13);
 scene.add(stripe);
 
 // ─── Pitch antenna — vertical rod on the RIGHT ────────────────────────────
-// Spans the full play range (PITCH_Y_MIN to PITCH_Y_MAX) so the rod is the ruler
-const ANTENNA_HEIGHT = PITCH_Y_MAX - PITCH_Y_MIN; // 0.8m
-const ANTENNA_CENTER_Y = (PITCH_Y_MIN + PITCH_Y_MAX) / 2;
-
+// Like a real theremin: player's right hand moves LEFT/RIGHT toward/away from the rod.
+// Rod is tall so it's easy to see; the horizontal distance to it is what matters.
+const ANTENNA_TOTAL_H = 1.1; // visual height of the full rod above tabletop
 const antennaMat = new THREE.MeshStandardMaterial({ color: 0xff4488, emissive: 0xff2266, emissiveIntensity: 1.5 });
-const antennaR = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, ANTENNA_HEIGHT, 8), antennaMat);
-antennaR.position.set(0.28, ANTENNA_CENTER_Y, STAND_Z);
+const antennaR = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, ANTENNA_TOTAL_H, 8), antennaMat);
+antennaR.position.set(PITCH_X_ANTENNA, STAND_Y + 0.05 + ANTENNA_TOTAL_H / 2, STAND_Z);
 scene.add(antennaR);
 
-// Antenna base stub (from tabletop to play range bottom)
-const stubR = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.009, PITCH_Y_MIN - STAND_Y - 0.05, 8), antennaMat);
-stubR.position.set(0.28, STAND_Y + 0.05 + (PITCH_Y_MIN - STAND_Y - 0.05) / 2, STAND_Z);
-scene.add(stubR);
-
-// Range markers on pitch antenna (one tick per octave step)
-const tickMat = new THREE.MeshStandardMaterial({ color: 0xff88bb, emissive: 0xff4488, emissiveIntensity: 1 });
-for (let i = 0; i <= 4; i++) {
-  const t = i / 4;
-  const y = PITCH_Y_MIN + t * ANTENNA_HEIGHT;
-  const tick = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.004, 8), tickMat);
-  tick.position.set(0.28, y, STAND_Z);
-  scene.add(tick);
-}
+// Horizontal proximity indicators — flat rings at hand height showing the play zone
+const tickMat = new THREE.MeshStandardMaterial({ color: 0xff88bb, emissive: 0xff4488, emissiveIntensity: 0.8, transparent: true, opacity: 0.6 });
+// One ring at the midpoint of the pitch range, in the XZ plane, to show where to hover
+const zoneRingGeo = new THREE.TorusGeometry((PITCH_X_ANTENNA - PITCH_X_FAR) / 2, 0.005, 6, 32);
+const zoneRing = new THREE.Mesh(zoneRingGeo, tickMat);
+zoneRing.rotation.x = Math.PI / 2;
+zoneRing.position.set(PITCH_X_FAR + (PITCH_X_ANTENNA - PITCH_X_FAR) / 2, 0.92, STAND_Z);
+scene.add(zoneRing);
 
 // ─── Volume loop — horizontal torus on the LEFT ───────────────────────────
-const VOL_HEIGHT = VOL_Y_MAX - VOL_Y_MIN;
-const VOL_CENTER_Y = (VOL_Y_MIN + VOL_Y_MAX) / 2;
-
+// Like a real theremin: left hand height above the loop controls volume.
+// Loop sits at VOL_Y_MIN; hand rises above it to increase volume.
 const loopMat = new THREE.MeshStandardMaterial({ color: 0x44ffaa, emissive: 0x22ff88, emissiveIntensity: 1.5 });
 const antennaL = new THREE.Mesh(new THREE.TorusGeometry(0.15, 0.007, 8, 32), loopMat);
-antennaL.position.set(-0.28, VOL_CENTER_Y, STAND_Z);
+antennaL.position.set(-0.28, VOL_Y_MIN, STAND_Z);
 antennaL.rotation.x = Math.PI / 2;
 scene.add(antennaL);
 
-// Vertical guide line for volume (shows the range visually)
-const volGuideMat = new THREE.MeshStandardMaterial({ color: 0x44ffaa, emissive: 0x22ff88, emissiveIntensity: 0.6, transparent: true, opacity: 0.5 });
-const volGuide = new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.003, VOL_HEIGHT, 6), volGuideMat);
-volGuide.position.set(-0.28, VOL_CENTER_Y, STAND_Z);
+// Vertical range guide: thin glowing line above the loop showing the play range
+const volGuideMat = new THREE.MeshStandardMaterial({ color: 0x44ffaa, emissive: 0x22ff88, emissiveIntensity: 0.5, transparent: true, opacity: 0.45 });
+const volGuide = new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.003, VOL_Y_MAX - VOL_Y_MIN, 6), volGuideMat);
+volGuide.position.set(-0.28, (VOL_Y_MIN + VOL_Y_MAX) / 2, STAND_Z);
 scene.add(volGuide);
 
-// Stub below loop
+// Stub from tabletop to loop
 const stubL = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.009, VOL_Y_MIN - STAND_Y - 0.05, 8), loopMat);
 stubL.position.set(-0.28, STAND_Y + 0.05 + (VOL_Y_MIN - STAND_Y - 0.05) / 2, STAND_Z);
 scene.add(stubL);
@@ -292,16 +285,16 @@ function drawInstructions() {
   ctx.fillText('RIGHT HAND', colR, 94);
   ctx.fillText('PITCH', colR, 118);
 
-  // Arrow up/down
+  // Arrow left/right
   ctx.fillStyle = '#ff4488';
   ctx.font = '48px sans-serif';
-  ctx.fillText('↕', colR, 188);
+  ctx.fillText('↔', colR, 188);
 
   ctx.fillStyle = '#cc6688';
   ctx.font = '15px monospace';
-  ctx.fillText('HIGHER  →  A5  880Hz', colR, 230);
-  ctx.fillText('─────────────────', colR, 248);
-  ctx.fillText('LOWER   →  A2  110Hz', colR, 266);
+  ctx.fillText('NEAR ROD  →  A5  880Hz', colR, 230);
+  ctx.fillText('──────────────────', colR, 248);
+  ctx.fillText('FAR LEFT  →  A2  110Hz', colR, 266);
 
   // Divider between columns
   ctx.strokeStyle = '#331155';
@@ -333,7 +326,7 @@ function drawInstructions() {
   ctx.fillStyle = '#776688';
   ctx.font = '14px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('~30cm of movement covers the full range', W / 2, H - 40);
+  ctx.fillText('~20cm sweep covers the full range', W / 2, H - 40);
   ctx.fillText('Pitch rod on your RIGHT · Volume loop on your LEFT', W / 2, H - 18);
 
   instrTex.needsUpdate = true;
@@ -494,12 +487,13 @@ function drawHUD() {
 drawHUD();
 
 // ─── Hand update ─────────────────────────────────────────────────────────────
+// Returns { x, y } of wrist, or null if not tracked
 function updateHand(src, frame, refSpace) {
   const isRight = src.handedness === 'right';
   const meshes  = isRight ? rightMeshes : leftMeshes;
   const orb     = isRight ? rightOrb    : leftOrb;
 
-  let wristY = null;
+  let wristPos = null;
 
   for (const jointName of HAND_JOINTS) {
     const jointSpace = src.hand.get(jointName);
@@ -512,7 +506,7 @@ function updateHand(src, frame, refSpace) {
       m.position.set(p.x, p.y, p.z);
       m.visible = true;
       if (jointName === 'wrist') {
-        wristY = p.y;
+        wristPos = { x: p.x, y: p.y };
         orb.position.set(p.x, p.y, p.z);
         orb.visible = true;
       }
@@ -522,7 +516,7 @@ function updateHand(src, frame, refSpace) {
     }
   }
 
-  return wristY;
+  return wristPos;
 }
 
 // ─── WebXR setup ─────────────────────────────────────────────────────────────
@@ -577,19 +571,19 @@ renderer.setAnimationLoop((timestamp, frame) => {
   if (frame && renderer.xr.isPresenting) {
     refSpace = renderer.xr.getReferenceSpace();
 
-    let rightWristY = null;
-    let leftWristY  = null;
+    let rightWrist = null;
+    let leftWrist  = null;
     rightTracked = false;
     leftTracked  = false;
 
     for (const src of xrSession.inputSources) {
       if (!src.hand) continue;
       if (src.handedness === 'right') {
-        rightWristY = updateHand(src, frame, refSpace);
-        rightTracked = rightWristY !== null;
+        rightWrist = updateHand(src, frame, refSpace);
+        rightTracked = rightWrist !== null;
       } else if (src.handedness === 'left') {
-        leftWristY = updateHand(src, frame, refSpace);
-        leftTracked = leftWristY !== null;
+        leftWrist = updateHand(src, frame, refSpace);
+        leftTracked = leftWrist !== null;
       }
     }
 
@@ -600,25 +594,25 @@ renderer.setAnimationLoop((timestamp, frame) => {
     // ── Audio control ──
     if (audioCtx && oscillator) {
       const now = audioCtx.currentTime;
-      const smoothTime = 0.04; // 40ms smoothing
+      const smoothTime = 0.03; // 30ms smoothing — snappier response
 
-      if (rightTracked && rightWristY !== null) {
-        const targetFreq = yToFreq(rightWristY);
+      if (rightTracked && rightWrist !== null) {
+        // Real theremin: right hand X distance from pitch rod → frequency
+        const targetFreq = xToFreq(rightWrist.x);
         currentFreq = targetFreq;
         oscillator.frequency.setTargetAtTime(targetFreq, now, smoothTime);
-        // Sync detune osc — we only have access to main oscillator's frequency here
-        // (osc2 is out of scope; its frequency follows via lfoGain naturally)
 
         // Color right hand by pitch (red=low → violet=high)
         const t = (targetFreq - FREQ_MIN) / (FREQ_MAX - FREQ_MIN);
-        _tmpColor.setHSL(0.85 - t * 0.5, 1, 0.55); // 0.85=magenta, 0.35=cyan
+        _tmpColor.setHSL(0.85 - t * 0.5, 1, 0.55);
         rightHandMat.emissive.copy(_tmpColor);
         rightOrb.material.emissive.copy(_tmpColor);
         rightOrb.material.color.copy(_tmpColor);
       }
 
-      if (leftTracked && leftWristY !== null) {
-        const targetGain = yToGain(leftWristY);
+      if (leftTracked && leftWrist !== null) {
+        // Real theremin: left hand height above volume loop → gain
+        const targetGain = yToGain(leftWrist.y);
         currentGain = targetGain;
         gainNode.gain.setTargetAtTime(targetGain * 0.6, now, smoothTime);
 
@@ -631,9 +625,9 @@ renderer.setAnimationLoop((timestamp, frame) => {
         // Pulse orb size with volume
         const pulse = 1 + t * 0.4 * (0.8 + 0.2 * Math.sin(time * 8));
         leftOrb.scale.setScalar(pulse);
-      } else if (audioCtx) {
+      } else {
         // Fade out when left hand lost
-        gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
+        gainNode.gain.setTargetAtTime(0, now, 0.1);
         currentGain = 0;
       }
     }
