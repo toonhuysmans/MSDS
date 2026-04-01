@@ -420,16 +420,18 @@ function captureTPose(body, frame, refSpace, inputSources) {
   }
   isCalibrated = n > 0;
 
-  // Scale VRM to match real person's height (viewer Y = headset ≈ head height)
+  // Scale VRM using body-tracked head joint Y (matches vrmNaturalHeadY semantically)
   if (vrm && isCalibrated) {
-    const viewerPose = frame.getViewerPose(refSpace);
-    if (viewerPose) {
-      // In local-floor space, y=0 is the floor, so viewerPose.y = full standing height
-      const realHeight = viewerPose.transform.position.y;
-      const vrmHeight  = vrmNaturalHeadY - vrmNaturalFootY;
-      if (realHeight > 0.5 && vrmHeight > 0.01) {
-        vrm.scene.scale.setScalar(realHeight / vrmHeight);
-        console.log(`Height scale: ${(realHeight/vrmHeight).toFixed(3)} (real: ${realHeight.toFixed(3)} m)`);
+    const headSpace = body.get('head');
+    if (headSpace) {
+      const headPose = frame.getPose(headSpace, refSpace);
+      if (headPose) {
+        const realHeadY = headPose.transform.position.y;
+        const vrmHeight = vrmNaturalHeadY - vrmNaturalFootY;
+        if (realHeadY > 0.5 && vrmHeight > 0.01) {
+          vrm.scene.scale.setScalar(realHeadY / vrmHeight);
+          console.log(`Height scale: ${(realHeadY/vrmHeight).toFixed(3)} (head Y: ${realHeadY.toFixed(3)} m)`);
+        }
       }
     }
   }
