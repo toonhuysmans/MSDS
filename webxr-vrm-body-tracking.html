@@ -100,6 +100,90 @@ const CAL_JOINTS = [
   'right-upper-leg', 'right-lower-leg',  'right-foot-ankle', 'right-foot-ball',
 ];
 
+// ============================================================
+// Hand tracking: XR joint → VRM finger bone, parent map
+// ============================================================
+// XRHand joint parent chain (shared for both hands, no side prefix)
+const HAND_JOINT_PARENT = {
+  'thumb-metacarpal':                      'wrist',
+  'thumb-phalanx-proximal':                'thumb-metacarpal',
+  'thumb-phalanx-distal':                  'thumb-phalanx-proximal',
+  'thumb-tip':                             'thumb-phalanx-distal',
+  'index-finger-metacarpal':               'wrist',
+  'index-finger-phalanx-proximal':         'index-finger-metacarpal',
+  'index-finger-phalanx-intermediate':     'index-finger-phalanx-proximal',
+  'index-finger-phalanx-distal':           'index-finger-phalanx-intermediate',
+  'middle-finger-metacarpal':              'wrist',
+  'middle-finger-phalanx-proximal':        'middle-finger-metacarpal',
+  'middle-finger-phalanx-intermediate':    'middle-finger-phalanx-proximal',
+  'middle-finger-phalanx-distal':          'middle-finger-phalanx-intermediate',
+  'ring-finger-metacarpal':                'wrist',
+  'ring-finger-phalanx-proximal':          'ring-finger-metacarpal',
+  'ring-finger-phalanx-intermediate':      'ring-finger-phalanx-proximal',
+  'ring-finger-phalanx-distal':            'ring-finger-phalanx-intermediate',
+  'pinky-finger-metacarpal':               'wrist',
+  'pinky-finger-phalanx-proximal':         'pinky-finger-metacarpal',
+  'pinky-finger-phalanx-intermediate':     'pinky-finger-phalanx-proximal',
+  'pinky-finger-phalanx-distal':           'pinky-finger-phalanx-intermediate',
+};
+
+// Drive order (parent-first within each finger)
+const HAND_DRIVE_ORDER = [
+  'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'index-finger-phalanx-proximal',  'index-finger-phalanx-intermediate',  'index-finger-phalanx-distal',
+  'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal',
+  'ring-finger-phalanx-proximal',   'ring-finger-phalanx-intermediate',   'ring-finger-phalanx-distal',
+  'pinky-finger-phalanx-proximal',  'pinky-finger-phalanx-intermediate',  'pinky-finger-phalanx-distal',
+];
+
+// XR hand joint → VRM bone, per side
+const HAND_TO_VRM = {
+  left: {
+    'thumb-phalanx-proximal':            VRMHumanBoneName.LeftThumbProximal,
+    'thumb-phalanx-distal':              VRMHumanBoneName.LeftThumbIntermediate,
+    'thumb-tip':                         VRMHumanBoneName.LeftThumbDistal,
+    'index-finger-phalanx-proximal':     VRMHumanBoneName.LeftIndexProximal,
+    'index-finger-phalanx-intermediate': VRMHumanBoneName.LeftIndexIntermediate,
+    'index-finger-phalanx-distal':       VRMHumanBoneName.LeftIndexDistal,
+    'middle-finger-phalanx-proximal':    VRMHumanBoneName.LeftMiddleProximal,
+    'middle-finger-phalanx-intermediate':VRMHumanBoneName.LeftMiddleIntermediate,
+    'middle-finger-phalanx-distal':      VRMHumanBoneName.LeftMiddleDistal,
+    'ring-finger-phalanx-proximal':      VRMHumanBoneName.LeftRingProximal,
+    'ring-finger-phalanx-intermediate':  VRMHumanBoneName.LeftRingIntermediate,
+    'ring-finger-phalanx-distal':        VRMHumanBoneName.LeftRingDistal,
+    'pinky-finger-phalanx-proximal':     VRMHumanBoneName.LeftLittleProximal,
+    'pinky-finger-phalanx-intermediate': VRMHumanBoneName.LeftLittleIntermediate,
+    'pinky-finger-phalanx-distal':       VRMHumanBoneName.LeftLittleDistal,
+  },
+  right: {
+    'thumb-phalanx-proximal':            VRMHumanBoneName.RightThumbProximal,
+    'thumb-phalanx-distal':              VRMHumanBoneName.RightThumbIntermediate,
+    'thumb-tip':                         VRMHumanBoneName.RightThumbDistal,
+    'index-finger-phalanx-proximal':     VRMHumanBoneName.RightIndexProximal,
+    'index-finger-phalanx-intermediate': VRMHumanBoneName.RightIndexIntermediate,
+    'index-finger-phalanx-distal':       VRMHumanBoneName.RightIndexDistal,
+    'middle-finger-phalanx-proximal':    VRMHumanBoneName.RightMiddleProximal,
+    'middle-finger-phalanx-intermediate':VRMHumanBoneName.RightMiddleIntermediate,
+    'middle-finger-phalanx-distal':      VRMHumanBoneName.RightMiddleDistal,
+    'ring-finger-phalanx-proximal':      VRMHumanBoneName.RightRingProximal,
+    'ring-finger-phalanx-intermediate':  VRMHumanBoneName.RightRingIntermediate,
+    'ring-finger-phalanx-distal':        VRMHumanBoneName.RightRingDistal,
+    'pinky-finger-phalanx-proximal':     VRMHumanBoneName.RightLittleProximal,
+    'pinky-finger-phalanx-intermediate': VRMHumanBoneName.RightLittleIntermediate,
+    'pinky-finger-phalanx-distal':       VRMHumanBoneName.RightLittleDistal,
+  },
+};
+
+// All hand joints needed for calibration (driven joints + their parents)
+const HAND_CAL_JOINTS = [
+  'wrist',
+  'thumb-metacarpal',            'thumb-phalanx-proximal',            'thumb-phalanx-distal',            'thumb-tip',
+  'index-finger-metacarpal',     'index-finger-phalanx-proximal',     'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal',
+  'middle-finger-metacarpal',    'middle-finger-phalanx-proximal',    'middle-finger-phalanx-intermediate','middle-finger-phalanx-distal',
+  'ring-finger-metacarpal',      'ring-finger-phalanx-proximal',      'ring-finger-phalanx-intermediate',  'ring-finger-phalanx-distal',
+  'pinky-finger-metacarpal',     'pinky-finger-phalanx-proximal',     'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal',
+];
+
 // Calibration state
 const calibRest = {};   // joint → THREE.Quaternion sampled at T-pose
 let isCalibrated = false;
@@ -226,6 +310,8 @@ loader.load(
 
 const _jointQ  = new THREE.Quaternion();
 const _parentQ = new THREE.Quaternion();
+const _Qy180   = new THREE.Quaternion(0, 1, 0, 0);   // 180° around world Y
+const _Qy180inv = new THREE.Quaternion(0, -1, 0, 0); // inverse
 
 function getXRQuat(body, frame, refSpace, jointName) {
   const space = body.get(jointName);
@@ -240,6 +326,15 @@ function getXRPose(body, frame, refSpace, jointName) {
   const space = body.get(jointName);
   if (!space) return null;
   return frame.getPose(space, refSpace);
+}
+
+function getHandQuat(xrHand, frame, refSpace, jointName) {
+  const space = xrHand.get(jointName);
+  if (!space) return null;
+  const pose = frame.getJointPose(space, refSpace);
+  if (!pose) return null;
+  const q = pose.transform.orientation;
+  return new THREE.Quaternion(q.x, q.y, q.z, q.w);
 }
 
 // ============================================================
@@ -281,14 +376,25 @@ function downloadCSV() {
   console.log(`CSV downloaded: ${csvRows.length} rows`);
 }
 
-function captureTPose(body, frame, refSpace) {
+function captureTPose(body, frame, refSpace, inputSources) {
   let n = 0;
   for (const name of CAL_JOINTS) {
     const q = getXRQuat(body, frame, refSpace, name);
     if (q) { calibRest[name] = q; n++; }
   }
+  // Capture hand joint T-pose quaternions; stored with side prefix (lh: / rh:)
+  if (inputSources) {
+    for (const src of inputSources) {
+      if (!src.hand) continue;
+      const prefix = src.handedness === 'left' ? 'lh:' : 'rh:';
+      for (const jname of HAND_CAL_JOINTS) {
+        const q = getHandQuat(src.hand, frame, refSpace, jname);
+        if (q) { calibRest[prefix + jname] = q; n++; }
+      }
+    }
+  }
   isCalibrated = n > 0;
-  console.log(`T-pose captured: ${n}/${CAL_JOINTS.length} joints`);
+  console.log(`T-pose captured: ${n} joints (body + fingers)`);
 }
 
 // Debug state: per-joint status shown in HUD (only populated for main vrm, not mirror)
@@ -325,8 +431,7 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
             .multiply(jointQuat)
             .multiply(calibRest[xrJoint].clone().invert());
           // Fix X/Z inversion: conjugate by 180° around world Y → (x,y,z,w)→(-x,y,-z,w)
-          const Qy180 = new THREE.Quaternion(0, 1, 0, 0);
-          corrected.premultiply(Qy180).multiply(Qy180.clone().invert());
+          corrected.premultiply(_Qy180).multiply(_Qy180inv);
           if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
           finalQuat = corrected;
         } else {
@@ -341,8 +446,7 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
       if (isCalibrated && calibRest[xrJoint]) {
         const corrected = jointQuat.clone().multiply(calibRest[xrJoint].clone().invert());
         // Fix X/Z inversion: conjugate by 180° around world Y → (x,y,z,w)→(-x,y,-z,w)
-        const Qy180 = new THREE.Quaternion(0, 1, 0, 0);
-        corrected.premultiply(Qy180).multiply(Qy180.clone().invert());
+        corrected.premultiply(_Qy180).multiply(_Qy180inv);
         if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
         finalQuat = corrected;
       } else {
@@ -371,7 +475,44 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
   }
 }
 
-function updateVRMFromBody(frame, refSpace) {
+function driveVRMFingers(vrmInstance, frame, refSpace, handedness, xrHand) {
+  const prefix = handedness === 'left' ? 'lh:' : 'rh:';
+  const mapping = HAND_TO_VRM[handedness];
+  if (!mapping) return;
+
+  for (const xrJoint of HAND_DRIVE_ORDER) {
+    const boneName = mapping[xrJoint];
+    if (!boneName) continue;
+    const boneNode = vrmInstance.humanoid.getNormalizedBoneNode(boneName);
+    if (!boneNode) continue;
+
+    const parentXRJoint = HAND_JOINT_PARENT[xrJoint];
+    if (!parentXRJoint) continue;
+
+    const jointQuat  = getHandQuat(xrHand, frame, refSpace, xrJoint);
+    if (!jointQuat) continue;
+    const parentQuat = getHandQuat(xrHand, frame, refSpace, parentXRJoint);
+    if (!parentQuat) continue;
+
+    const calKey       = prefix + xrJoint;
+    const calParentKey = prefix + parentXRJoint;
+
+    if (isCalibrated && calibRest[calParentKey] && calibRest[calKey]) {
+      // Same world-frame retargeting formula as body joints
+      const corrected = calibRest[calParentKey].clone()
+        .multiply(parentQuat.clone().invert())
+        .multiply(jointQuat)
+        .multiply(calibRest[calKey].clone().invert());
+      corrected.premultiply(_Qy180).multiply(_Qy180inv);
+      boneNode.quaternion.copy(corrected);
+    } else {
+      // Fallback: raw relative rotation before calibration
+      boneNode.quaternion.copy(parentQuat.clone().invert().multiply(jointQuat));
+    }
+  }
+}
+
+function updateVRMFromBody(frame, refSpace, inputSources) {
   const body = frame.body;
   if (!body || !vrm) return false;
 
@@ -389,6 +530,13 @@ function updateVRMFromBody(frame, refSpace) {
   }
 
   driveVRM(vrm, body, frame, refSpace, true);
+
+  // Drive finger bones from hand tracking
+  if (inputSources) {
+    for (const src of inputSources) {
+      if (src.hand) driveVRMFingers(vrm, frame, refSpace, src.handedness, src.hand);
+    }
+  }
 
   return true;
 }
@@ -552,13 +700,15 @@ renderer.setAnimationLoop((timestamp, frame) => {
       }
     }
 
+    const inputSrcs = xrSession ? xrSession.inputSources : [];
+
     // Fire calibration when countdown expires
     if (calibCountdownEnd > 0 && performance.now() >= calibCountdownEnd) {
       calibCountdownEnd = 0;
-      if (frame.body) captureTPose(frame.body, frame, refSpace);
+      if (frame.body) captureTPose(frame.body, frame, refSpace, inputSrcs);
     }
 
-    updateVRMFromBody(frame, refSpace);
+    updateVRMFromBody(frame, refSpace, inputSrcs);
 
     // CSV recording frame management
     if (isRecording) {
