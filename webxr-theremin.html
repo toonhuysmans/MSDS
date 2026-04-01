@@ -487,13 +487,13 @@ function drawHUD() {
 drawHUD();
 
 // ─── Hand update ─────────────────────────────────────────────────────────────
-// Returns { x, y } of wrist, or null if not tracked
+// Returns { x, y } of index fingertip, or null if not tracked
 function updateHand(src, frame, refSpace) {
   const isRight = src.handedness === 'right';
   const meshes  = isRight ? rightMeshes : leftMeshes;
   const orb     = isRight ? rightOrb    : leftOrb;
 
-  let wristPos = null;
+  let tipPos = null;
 
   for (const jointName of HAND_JOINTS) {
     const jointSpace = src.hand.get(jointName);
@@ -505,18 +505,18 @@ function updateHand(src, frame, refSpace) {
       const p = pose.transform.position;
       m.position.set(p.x, p.y, p.z);
       m.visible = true;
-      if (jointName === 'wrist') {
-        wristPos = { x: p.x, y: p.y };
+      if (jointName === 'index-finger-tip') {
+        tipPos = { x: p.x, y: p.y };
         orb.position.set(p.x, p.y, p.z);
         orb.visible = true;
       }
     } else {
       m.visible = false;
-      if (jointName === 'wrist') orb.visible = false;
+      if (jointName === 'index-finger-tip') orb.visible = false;
     }
   }
 
-  return wristPos;
+  return tipPos;
 }
 
 // ─── WebXR setup ─────────────────────────────────────────────────────────────
