@@ -44,7 +44,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { Reflector } from 'three/addons/objects/Reflector.js';
 import { Sky } from 'three/addons/objects/Sky.js';
-import { VRMLoaderPlugin, VRMHumanBoneName } from '@pixiv/three-vrm';
+import { VRMLoaderPlugin, VRMHumanBoneName, VRMHumanBoneParentMap } from '@pixiv/three-vrm';
 
 // ============================================================
 // CONFIG
@@ -130,7 +130,7 @@ const HAND_JOINT_PARENT = {
 
 // Drive order (parent-first within each finger)
 const HAND_DRIVE_ORDER = [
-  'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
   'index-finger-phalanx-proximal',  'index-finger-phalanx-intermediate',  'index-finger-phalanx-distal',
   'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal',
   'ring-finger-phalanx-proximal',   'ring-finger-phalanx-intermediate',   'ring-finger-phalanx-distal',
@@ -140,6 +140,7 @@ const HAND_DRIVE_ORDER = [
 // XR hand joint → VRM bone, per side
 const HAND_TO_VRM = {
   left: {
+    'thumb-metacarpal':                  VRMHumanBoneName.LeftThumbMetacarpal,
     'thumb-phalanx-proximal':            VRMHumanBoneName.LeftThumbProximal,
     'thumb-phalanx-distal':              VRMHumanBoneName.LeftThumbIntermediate,
     'thumb-tip':                         VRMHumanBoneName.LeftThumbDistal,
@@ -157,6 +158,7 @@ const HAND_TO_VRM = {
     'pinky-finger-phalanx-distal':       VRMHumanBoneName.LeftLittleDistal,
   },
   right: {
+    'thumb-metacarpal':                  VRMHumanBoneName.RightThumbMetacarpal,
     'thumb-phalanx-proximal':            VRMHumanBoneName.RightThumbProximal,
     'thumb-phalanx-distal':              VRMHumanBoneName.RightThumbIntermediate,
     'thumb-tip':                         VRMHumanBoneName.RightThumbDistal,
@@ -191,30 +193,18 @@ let isCalibrated = false;
 let calibCountdownEnd = 0;   // performance.now() timestamp when sampling fires; 0 = idle
 let thumbstickWasPressed = false;
 
-// XR body joint hierarchy — needed to compute relative rotations
-const XR_PARENT = {
-  'spine-lower':      'hips',
-  'spine-middle':     'spine-lower',
-  'spine-upper':      'spine-middle',
-  'neck':             'spine-upper',
-  'head':             'neck',
-  'left-shoulder':    'spine-upper',
-  'left-arm-upper':   'left-shoulder',
-  'left-arm-lower':   'left-arm-upper',
-  'left-hand-wrist':  'left-arm-lower',
-  'right-shoulder':   'spine-upper',
-  'right-arm-upper':  'right-shoulder',
-  'right-arm-lower':  'right-arm-upper',
-  'right-hand-wrist': 'right-arm-lower',
-  'left-upper-leg':   'hips',
-  'left-lower-leg':   'left-upper-leg',
-  'left-foot-ankle':  'left-lower-leg',
-  'left-foot-ball':   'left-foot-ankle',
-  'right-upper-leg':  'hips',
-  'right-lower-leg':  'right-upper-leg',
-  'right-foot-ankle': 'right-lower-leg',
-  'right-foot-ball':  'right-foot-ankle',
-};
+// XR body joint hierarchy — derived from VRMHumanBoneParentMap so it stays
+// in sync with the VRM spec rather than being maintained manually.
+const VRM_TO_XR = {};
+for (const [xr, vrm] of Object.entries(XR_TO_VRM)) VRM_TO_XR[vrm] = xr;
+
+const XR_PARENT = {};
+for (const [xrJoint, vrmBone] of Object.entries(XR_TO_VRM)) {
+  const parentVrmBone = VRMHumanBoneParentMap[vrmBone];
+  if (parentVrmBone && VRM_TO_XR[parentVrmBone]) {
+    XR_PARENT[xrJoint] = VRM_TO_XR[parentVrmBone];
+  }
+}
 
 // ============================================================
 // Scene
@@ -478,14 +468,12 @@ function captureTPose(body, frame, refSpace, inputSources) {
 // Debug state: per-joint status shown in HUD (only populated for main vrm, not mirror)
 const debugJointStatus = {};
 
-function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
+// Accumulate body bone rotations into pose object (for setNormalizedPose)
+function driveVRM(body, frame, refSpace, isMain, pose) {
   const ts = performance.now().toFixed(2);
   for (const xrJoint of BONE_DRIVE_ORDER) {
     const boneName = XR_TO_VRM[xrJoint];
     if (!boneName) continue;
-
-    const boneNode = vrmInstance.humanoid.getNormalizedBoneNode(boneName);
-    if (!boneNode) continue;
 
     const jointQuat = getXRQuat(body, frame, refSpace, xrJoint);
     if (!jointQuat) {
@@ -501,14 +489,10 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
       if (parentQuat) {
         const rel = parentQuat.clone().invert().multiply(jointQuat);
         if (isCalibrated && calibRest[parentXRJoint] && calibRest[xrJoint]) {
-          // Express delta-from-T-pose in world frame (VRM normalized = world-aligned at T-pose).
-          // corrected = Ct_parent × parent⁻¹ × child × Ct_child⁻¹
-          // This is equivalent to: conjugate(Ct_parent) of (rel × restRel⁻¹)
           const corrected = calibRest[parentXRJoint].clone()
             .multiply(parentQuat.clone().invert())
             .multiply(jointQuat)
             .multiply(calibRest[xrJoint].clone().invert());
-          // Fix X/Z inversion: conjugate by 180° around world Y → (x,y,z,w)→(-x,y,-z,w)
           corrected.premultiply(_Qy180).multiply(_Qy180inv);
           if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
           finalQuat = corrected;
@@ -520,10 +504,9 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
         if (isMain) debugJointStatus[xrJoint] = `✗ parent(${parentXRJoint}) null`;
       }
     } else {
-      // Root joint (hips) — world-frame delta: child × Ct_child⁻¹
+      // Root (hips)
       if (isCalibrated && calibRest[xrJoint]) {
         const corrected = jointQuat.clone().multiply(calibRest[xrJoint].clone().invert());
-        // Fix X/Z inversion: conjugate by 180° around world Y → (x,y,z,w)→(-x,y,-z,w)
         corrected.premultiply(_Qy180).multiply(_Qy180inv);
         if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
         finalQuat = corrected;
@@ -534,26 +517,26 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
     }
 
     if (!finalQuat) continue;
-    boneNode.quaternion.copy(finalQuat);
+    pose[boneName] = { rotation: [finalQuat.x, finalQuat.y, finalQuat.z, finalQuat.w] };
 
-    // CSV recording — only for main VRM, one row per joint per frame
+    // CSV recording
     if (isMain && isRecording) {
       const xrp = getXRPose(body, frame, refSpace, xrJoint);
       const p = xrp ? xrp.transform.position : null;
-      const q = jointQuat;
-      const v = finalQuat;
-      const n = (x) => x != null ? x.toFixed(6) : '';
+      const q = jointQuat, v = finalQuat;
+      const fmt = (x) => x != null ? x.toFixed(6) : '';
       csvRows.push(
         `${csvFrameNum},${ts},${xrJoint},${isCalibrated ? 1 : 0},` +
-        `${n(p?.x)},${n(p?.y)},${n(p?.z)},` +
-        `${n(q.x)},${n(q.y)},${n(q.z)},${n(q.w)},` +
-        `${n(v.x)},${n(v.y)},${n(v.z)},${n(v.w)}`
+        `${fmt(p?.x)},${fmt(p?.y)},${fmt(p?.z)},` +
+        `${fmt(q.x)},${fmt(q.y)},${fmt(q.z)},${fmt(q.w)},` +
+        `${fmt(v.x)},${fmt(v.y)},${fmt(v.z)},${fmt(v.w)}`
       );
     }
   }
 }
 
-function driveVRMFingers(vrmInstance, frame, refSpace, handedness, xrHand) {
+// Accumulate finger bone rotations into the same pose object
+function driveVRMFingers(frame, refSpace, handedness, xrHand, pose) {
   const prefix = handedness === 'left' ? 'lh:' : 'rh:';
   const mapping = HAND_TO_VRM[handedness];
   if (!mapping) return;
@@ -561,8 +544,6 @@ function driveVRMFingers(vrmInstance, frame, refSpace, handedness, xrHand) {
   for (const xrJoint of HAND_DRIVE_ORDER) {
     const boneName = mapping[xrJoint];
     if (!boneName) continue;
-    const boneNode = vrmInstance.humanoid.getNormalizedBoneNode(boneName);
-    if (!boneNode) continue;
 
     const parentXRJoint = HAND_JOINT_PARENT[xrJoint];
     if (!parentXRJoint) continue;
@@ -575,18 +556,17 @@ function driveVRMFingers(vrmInstance, frame, refSpace, handedness, xrHand) {
     const calKey       = prefix + xrJoint;
     const calParentKey = prefix + parentXRJoint;
 
+    let corrected;
     if (isCalibrated && calibRest[calParentKey] && calibRest[calKey]) {
-      // Same world-frame retargeting formula as body joints
-      const corrected = calibRest[calParentKey].clone()
+      corrected = calibRest[calParentKey].clone()
         .multiply(parentQuat.clone().invert())
         .multiply(jointQuat)
         .multiply(calibRest[calKey].clone().invert());
       corrected.premultiply(_Qy180).multiply(_Qy180inv);
-      boneNode.quaternion.copy(corrected);
     } else {
-      // Fallback: raw relative rotation before calibration
-      boneNode.quaternion.copy(parentQuat.clone().invert().multiply(jointQuat));
+      corrected = parentQuat.clone().invert().multiply(jointQuat);
     }
+    pose[boneName] = { rotation: [corrected.x, corrected.y, corrected.z, corrected.w] };
   }
 }
 
