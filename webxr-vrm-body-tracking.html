@@ -312,10 +312,10 @@ loader.load(
     vrmNaturalHeadY = _tv.y;
     vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Hips).getWorldPosition(_tv);
     vrmNaturalHipsY = _tv.y;
-    const leftFootNode  = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftFoot);
-    const rightFootNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightFoot);
-    leftFootNode?.getWorldPosition(_tv);  const lyf = _tv.y;
-    rightFootNode?.getWorldPosition(_tv); const ryf = _tv.y;
+    const leftToesNode  = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftToes);
+    const rightToesNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightToes);
+    leftToesNode?.getWorldPosition(_tv);  const lyf = _tv.y;
+    rightToesNode?.getWorldPosition(_tv); const ryf = _tv.y;
     vrmNaturalFootY = Math.min(lyf, ryf);
     console.log('VRM loaded — headY:', vrmNaturalHeadY.toFixed(3), 'hipsY:', vrmNaturalHipsY.toFixed(3), 'footY:', vrmNaturalFootY.toFixed(3));
   },
@@ -603,8 +603,8 @@ function updateVRMFromBody(frame, refSpace, inputSources) {
 
   // Ground: after all bones are driven, shift scene so the lowest foot bone sits at y=0
   vrm.scene.updateMatrixWorld(true);
-  const lFoot = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftFoot);
-  const rFoot = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightFoot);
+  const lFoot = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftToes);
+  const rFoot = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightToes);
   if (lFoot && rFoot) {
     lFoot.getWorldPosition(_groundVec); const ly = _groundVec.y;
     rFoot.getWorldPosition(_groundVec); const ry = _groundVec.y;
