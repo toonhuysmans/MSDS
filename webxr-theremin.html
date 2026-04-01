@@ -115,7 +115,7 @@ const FREQ_MAX = 880;
 // Volume: left hand Y → gain  (real theremin: hand height above volume loop)
 // ~20cm vertical sweep covers full range.
 const VOL_Y_MIN = 0.82;  // hand low  → silent
-const VOL_Y_MAX = 1.02;  // hand high → full volume
+const VOL_Y_MAX = 0.88;  // hand high → full volume (~6cm, finger-level movement)
 
 function xToFreq(x) {
   const t = Math.max(0, Math.min(1, (x - PITCH_X_FAR) / (PITCH_X_NEAR - PITCH_X_FAR)));
@@ -195,7 +195,7 @@ const frameMat = new THREE.MeshStandardMaterial({ color: 0x221133, roughness: 0.
 
 // ─── Theremin stand — compact, right in front ─────────────────────────────
 const STAND_Z = -0.55; // close enough to reach without moving feet
-const STAND_Y = 0.78;  // tabletop height
+const STAND_Y = 0.50;  // tabletop height (lowered)
 
 // Box body
 const boxMat = new THREE.MeshStandardMaterial({ color: 0x1a0a2e, roughness: 0.4, metalness: 0.7 });
