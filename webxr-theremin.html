@@ -104,15 +104,16 @@ function initAudio() {
 }
 
 // Pitch: right hand Y → frequency (110 Hz – 880 Hz, two octaves)
-// Range is waist → shoulder — no need to raise arm above head
-const PITCH_Y_MIN = 0.65; // hip / waist level
-const PITCH_Y_MAX = 1.45; // shoulder level
+// ~30cm of movement covers the full range
+const PITCH_Y_MIN = 0.85; // just below waist
+const PITCH_Y_MAX = 1.15; // just above waist
 const FREQ_MIN = 110;
 const FREQ_MAX = 880;
 
-// Volume: left hand Y → gain (slightly tighter range)
-const VOL_Y_MIN  = 0.55;
-const VOL_Y_MAX  = 1.35;
+// Volume: left hand Y → gain
+// ~30cm of movement covers full range
+const VOL_Y_MIN  = 0.75;
+const VOL_Y_MAX  = 1.05;
 
 function yToFreq(y) {
   const t = Math.max(0, Math.min(1, (y - PITCH_Y_MIN) / (PITCH_Y_MAX - PITCH_Y_MIN)));
@@ -298,9 +299,9 @@ function drawInstructions() {
 
   ctx.fillStyle = '#cc6688';
   ctx.font = '15px monospace';
-  ctx.fillText('SHOULDER  →  A5  880Hz', colR, 230);
+  ctx.fillText('HIGHER  →  A5  880Hz', colR, 230);
   ctx.fillText('─────────────────', colR, 248);
-  ctx.fillText('HIP        →  A2  110Hz', colR, 266);
+  ctx.fillText('LOWER   →  A2  110Hz', colR, 266);
 
   // Divider between columns
   ctx.strokeStyle = '#331155';
@@ -332,7 +333,7 @@ function drawInstructions() {
   ctx.fillStyle = '#776688';
   ctx.font = '14px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('Stand still — everything is within arm\'s reach', W / 2, H - 40);
+  ctx.fillText('~30cm of movement covers the full range', W / 2, H - 40);
   ctx.fillText('Pitch rod on your RIGHT · Volume loop on your LEFT', W / 2, H - 18);
 
   instrTex.needsUpdate = true;
