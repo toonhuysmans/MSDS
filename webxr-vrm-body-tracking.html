@@ -552,19 +552,21 @@ function driveVRMFingers(vrmInstance, frame, refSpace, handedness, xrHand) {
   }
 }
 
+const _groundVec = new THREE.Vector3();
+
 function updateVRMFromBody(frame, refSpace, inputSources) {
   const body = frame.body;
   if (!body || !vrm) return false;
 
   vrm.scene.visible = true;
 
-  // Position model: follow hips X/Z, pin feet to floor (y=0 in local-floor space)
+  // Horizontal position from hips; Y will be grounded below
   const hipsSpace = body.get('hips');
   if (hipsSpace) {
     const hipsPose = frame.getPose(hipsSpace, refSpace);
     if (hipsPose) {
       const hp = hipsPose.transform.position;
-      vrm.scene.position.set(hp.x, -vrmNaturalFootY * vrm.scene.scale.y, hp.z);
+      vrm.scene.position.set(hp.x, hp.y - vrmNaturalHipsY * vrm.scene.scale.y, hp.z);
     }
   }
 
@@ -575,6 +577,16 @@ function updateVRMFromBody(frame, refSpace, inputSources) {
     for (const src of inputSources) {
       if (src.hand) driveVRMFingers(vrm, frame, refSpace, src.handedness, src.hand);
     }
+  }
+
+  // Ground: after all bones are driven, shift scene so the lowest foot bone sits at y=0
+  vrm.scene.updateMatrixWorld(true);
+  const lFoot = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftFoot);
+  const rFoot = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightFoot);
+  if (lFoot && rFoot) {
+    lFoot.getWorldPosition(_groundVec); const ly = _groundVec.y;
+    rFoot.getWorldPosition(_groundVec); const ry = _groundVec.y;
+    vrm.scene.position.y -= Math.min(ly, ry);
   }
 
   return true;
