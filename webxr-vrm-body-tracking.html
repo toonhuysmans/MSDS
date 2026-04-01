@@ -49,7 +49,7 @@ import { VRMLoaderPlugin, VRMHumanBoneName } from '@pixiv/three-vrm';
 // CONFIG
 // ============================================================
 // Replace with your own VRM from VRoid Hub for a custom avatar
-const VRM_URL = 'https://raw.githubusercontent.com/toonhuysmans/MSDS/main/911283479678508015.vrm';
+const VRM_URL = 'https://raw.githubusercontent.com/pixiv/three-vrm/dev/packages/three-vrm/examples/models/VRM1_Constraint_Twist_Sample.vrm';
 const MIRROR_Z = -2.0;  // Z position of the mirror wall
 
 // ============================================================
@@ -277,8 +277,8 @@ loader.load(
 
     vrm = gltf.userData.vrm;
 
-    // This avatar faces -Z by default (toward the mirror), so no rotation needed.
-    vrm.scene.rotation.y = 0;
+    // VRM1 sample faces +Z; rotate 180° so it faces the mirror at -Z.
+    vrm.scene.rotation.y = Math.PI;
 
     // Disable lookAt so the VRM doesn't override head orientation toward the camera
     vrm.lookAt = undefined;
