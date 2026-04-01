@@ -337,6 +337,19 @@ function getHandQuat(xrHand, frame, refSpace, jointName) {
   return new THREE.Quaternion(q.x, q.y, q.z, q.w);
 }
 
+// Pinch detection via thumb-tip / index-finger-tip distance (<3 cm)
+function detectHandPinch(xrHand, frame, refSpace) {
+  const ts = xrHand.get('thumb-tip');
+  const is = xrHand.get('index-finger-tip');
+  if (!ts || !is) return false;
+  const tp = frame.getJointPose(ts, refSpace);
+  const ip = frame.getJointPose(is, refSpace);
+  if (!tp || !ip) return false;
+  const p = tp.transform.position, q = ip.transform.position;
+  const d2 = (p.x-q.x)**2 + (p.y-q.y)**2 + (p.z-q.z)**2;
+  return d2 < 0.03 * 0.03;
+}
+
 // ============================================================
 // CSV recording
 // ============================================================
@@ -687,17 +700,18 @@ renderer.setAnimationLoop((timestamp, frame) => {
   if (frame && renderer.xr.isPresenting) {
     refSpace = renderer.xr.getReferenceSpace();
 
-    // Input: controllers use thumbstick (btn 3); hand tracking uses pinch (btn 0 = select)
+    // Input: controllers use thumbstick (btn 3); hand tracking uses pinch (distance-based)
     if (xrSession) {
       usingHandTracking = false;
       for (const src of xrSession.inputSources) {
         const isHand = !!src.hand;
         if (isHand) usingHandTracking = true;
-        // Button index: thumbstick press for controller, pinch (select) for hand tracking
-        const btnIdx = isHand ? 0 : 3;
+        // Pinch for hands (distance), thumbstick press for controllers
+        const pressed = isHand
+          ? detectHandPinch(src.hand, frame, refSpace)
+          : (src.gamepad?.buttons[3]?.pressed ?? false);
         if (src.handedness === 'right') {
           if (!isHand) debugBtnsR = src.gamepad?.buttons.map(b => b.pressed) ?? [];
-          const pressed = src.gamepad?.buttons[btnIdx]?.pressed ?? false;
           if (pressed && !thumbstickWasPressed && calibCountdownEnd === 0) {
             calibCountdownEnd = performance.now() + 3000;
             isCalibrated = false;
@@ -705,7 +719,6 @@ renderer.setAnimationLoop((timestamp, frame) => {
           thumbstickWasPressed = pressed;
         } else if (src.handedness === 'left') {
           if (!isHand) debugBtnsL = src.gamepad?.buttons.map(b => b.pressed) ?? [];
-          const pressed = src.gamepad?.buttons[btnIdx]?.pressed ?? false;
           if (pressed && !leftThumbWasPressed) toggleRecording();
           leftThumbWasPressed = pressed;
         }
