@@ -41,7 +41,7 @@ import { Reflector } from 'three/addons/objects/Reflector.js';
 let audioCtx = null;
 let oscillator = null;
 let gainNode = null;
-let reverbGain = null;
+let filterNode = null; // lowpass — cutoff tracks volume for dynamic brightness
 
 function initAudio() {
   if (audioCtx) return;
@@ -57,23 +57,31 @@ function initAudio() {
   }
   convolver.buffer = irBuf;
 
-  // Vibrato LFO
+  // Vibrato: main LFO (~5.5 Hz) modulated by a slow secondary LFO (0.25 Hz)
+  // so the vibrato rate drifts slightly — more organic, less mechanical
   const lfo = audioCtx.createOscillator();
   const lfoGain = audioCtx.createGain();
   lfo.frequency.value = 5.5;
-  lfoGain.gain.value = 0; // starts silent; ramped in
+  lfoGain.gain.value = 0;
   lfo.connect(lfoGain);
   lfo.start();
 
-  // Main oscillator (theremin-style sine + a little detune)
-  oscillator = audioCtx.createOscillator();
-  oscillator.type = 'sine';
-  oscillator.frequency.value = 220;
-  lfoGain.connect(oscillator.frequency); // vibrato
+  const lfoRateWobble = audioCtx.createOscillator(); // modulates lfo.frequency
+  const lfoRateWobbleGain = audioCtx.createGain();
+  lfoRateWobble.frequency.value = 0.25;
+  lfoRateWobbleGain.gain.value = 0.6; // ±0.6 Hz drift on vibrato rate
+  lfoRateWobble.connect(lfoRateWobbleGain);
+  lfoRateWobbleGain.connect(lfo.frequency);
+  lfoRateWobble.start();
 
-  // Slight second osc for warmth
+  // Sawtooth oscillators — richer harmonic content than sine
+  oscillator = audioCtx.createOscillator();
+  oscillator.type = 'sawtooth';
+  oscillator.frequency.value = 220;
+  lfoGain.connect(oscillator.frequency);
+
   const osc2 = audioCtx.createOscillator();
-  osc2.type = 'sine';
+  osc2.type = 'sawtooth';
   osc2.frequency.value = 220;
   osc2.detune.value = 7;
   lfoGain.connect(osc2.frequency);
@@ -81,15 +89,23 @@ function initAudio() {
   gainNode = audioCtx.createGain();
   gainNode.gain.value = 0;
 
+  // Lowpass filter — cutoff rises with volume: quiet = dark/muted, loud = bright
+  // This replicates the natural harmonic characteristic of a real theremin
+  filterNode = audioCtx.createBiquadFilter();
+  filterNode.type = 'lowpass';
+  filterNode.frequency.value = 300; // starts dark/silent
+  filterNode.Q.value = 1.2;         // slight resonance warmth at cutoff
+
   const dryGain = audioCtx.createGain();
   dryGain.gain.value = 0.7;
-  reverbGain = audioCtx.createGain();
+  const reverbGain = audioCtx.createGain();
   reverbGain.gain.value = 0.35;
 
   oscillator.connect(gainNode);
   osc2.connect(gainNode);
-  gainNode.connect(dryGain);
-  gainNode.connect(convolver);
+  gainNode.connect(filterNode);
+  filterNode.connect(dryGain);
+  filterNode.connect(convolver);
   convolver.connect(reverbGain);
   dryGain.connect(audioCtx.destination);
   reverbGain.connect(audioCtx.destination);
@@ -97,7 +113,7 @@ function initAudio() {
   oscillator.start();
   osc2.start();
 
-  // Ramp in vibrato after 1.5s
+  // Vibrato ramps in after 1.5s (natural theremin behaviour — player settles first)
   setTimeout(() => {
     lfoGain.gain.setTargetAtTime(3.5, audioCtx.currentTime, 0.8);
   }, 1500);
@@ -249,17 +265,17 @@ scene.add(stubL);
 
 // ─── Instruction panel ────────────────────────────────────────────────────
 const instrCanvas = document.createElement('canvas');
-instrCanvas.width = 640; instrCanvas.height = 480;
+instrCanvas.width = 640; instrCanvas.height = 560;
 const instrCtx = instrCanvas.getContext('2d');
 const instrTex = new THREE.CanvasTexture(instrCanvas);
 
 function drawInstructions() {
   const ctx = instrCtx;
-  const W = 640, H = 480;
+  const W = 640, H = 560;
   ctx.clearRect(0, 0, W, H);
 
   // Background
-  ctx.fillStyle = 'rgba(6,6,22,0.92)';
+  ctx.fillStyle = 'rgba(6,6,22,0.93)';
   ctx.beginPath(); ctx.roundRect(4, 4, W - 8, H - 8, 16); ctx.fill();
   ctx.strokeStyle = '#441166';
   ctx.lineWidth = 2;
@@ -267,78 +283,102 @@ function drawInstructions() {
 
   // Title
   ctx.fillStyle = '#cc88ff';
-  ctx.font = 'bold 28px monospace';
+  ctx.font = 'bold 26px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('HOW TO PLAY', W / 2, 46);
+  ctx.fillText('HOW TO PLAY', W / 2, 44);
 
-  // Divider
   ctx.strokeStyle = '#331155';
   ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(32, 60); ctx.lineTo(W - 32, 60); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(32, 58); ctx.lineTo(W - 32, 58); ctx.stroke();
 
-  // ── Right hand / Pitch ──────────────────────────────────
+  // ── Two-column: Right / Left ────────────────────────────
   const colR = 160, colL = 480;
 
+  // Right hand
   ctx.fillStyle = '#ff4488';
-  ctx.font = 'bold 20px monospace';
+  ctx.font = 'bold 19px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('RIGHT HAND', colR, 94);
-  ctx.fillText('PITCH', colR, 118);
-
-  // Arrow left/right
-  ctx.fillStyle = '#ff4488';
-  ctx.font = '48px sans-serif';
-  ctx.fillText('↔', colR, 188);
-
+  ctx.fillText('RIGHT HAND', colR, 90);
+  ctx.fillText('PITCH', colR, 112);
+  ctx.font = '42px sans-serif';
+  ctx.fillText('↔', colR, 172);
   ctx.fillStyle = '#cc6688';
-  ctx.font = '15px monospace';
-  ctx.fillText('NEAR ROD  →  A5  880Hz', colR, 230);
-  ctx.fillText('──────────────────', colR, 248);
-  ctx.fillText('FAR LEFT  →  A2  110Hz', colR, 266);
-
-  // Divider between columns
-  ctx.strokeStyle = '#331155';
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(W / 2, 70); ctx.lineTo(W / 2, H - 32); ctx.stroke();
-
-  // ── Left hand / Volume ──────────────────────────────────
-  ctx.fillStyle = '#44ffaa';
-  ctx.font = 'bold 20px monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText('LEFT HAND', colL, 94);
-  ctx.fillText('VOLUME', colL, 118);
-
-  ctx.fillStyle = '#44ffaa';
-  ctx.font = '48px sans-serif';
-  ctx.fillText('↕', colL, 188);
-
-  ctx.fillStyle = '#22aa66';
-  ctx.font = '15px monospace';
-  ctx.fillText('RAISE  →  LOUDER', colL, 230);
-  ctx.fillText('─────────────────', colL, 248);
-  ctx.fillText('LOWER  →  QUIETER', colL, 266);
-
-  // ── Tip ─────────────────────────────────────────────────
-  ctx.strokeStyle = '#331155';
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(32, H - 64); ctx.lineTo(W - 32, H - 64); ctx.stroke();
-
-  ctx.fillStyle = '#776688';
   ctx.font = '14px monospace';
+  ctx.fillText('NEAR ROD → A5  880Hz', colR, 210);
+  ctx.fillText('────────────────', colR, 226);
+  ctx.fillText('FAR LEFT → A2  110Hz', colR, 242);
+  ctx.fillStyle = '#886677';
+  ctx.font = '13px monospace';
+  ctx.fillText('index fingertip · ~20cm', colR, 264);
+
+  // Column divider
+  ctx.strokeStyle = '#331155';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(W / 2, 66); ctx.lineTo(W / 2, 380); ctx.stroke();
+
+  // Left hand
+  ctx.fillStyle = '#44ffaa';
+  ctx.font = 'bold 19px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('~20cm sweep covers the full range', W / 2, H - 40);
-  ctx.fillText('Pitch rod on your RIGHT · Volume loop on your LEFT', W / 2, H - 18);
+  ctx.fillText('LEFT HAND', colL, 90);
+  ctx.fillText('VOLUME', colL, 112);
+  ctx.font = '42px sans-serif';
+  ctx.fillText('↕', colL, 172);
+  ctx.fillStyle = '#22aa66';
+  ctx.font = '14px monospace';
+  ctx.fillText('RAISE → LOUDER', colL, 210);
+  ctx.fillText('────────────────', colL, 226);
+  ctx.fillText('LOWER → QUIETER', colL, 242);
+  ctx.fillStyle = '#336655';
+  ctx.font = '13px monospace';
+  ctx.fillText('index fingertip · ~6cm', colL, 264);
+
+  // ── Sound behaviour section ─────────────────────────────
+  ctx.strokeStyle = '#331155';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(32, 292); ctx.lineTo(W - 32, 292); ctx.stroke();
+
+  ctx.fillStyle = '#9966bb';
+  ctx.font = 'bold 16px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('SOUND BEHAVIOUR', W / 2, 316);
+
+  const notes = [
+    ['Timbre',    'sawtooth wave — richer harmonics than sine'],
+    ['Brightness','tone gets brighter as you play louder'],
+    ['Vibrato',   'builds in after ~1.5s, rate drifts naturally'],
+    ['Portamento','pitch glides smoothly between notes'],
+  ];
+  ctx.textAlign = 'left';
+  notes.forEach(([label, desc], i) => {
+    const y = 344 + i * 36;
+    ctx.fillStyle = '#cc88ff';
+    ctx.font = 'bold 13px monospace';
+    ctx.fillText(label, 36, y);
+    ctx.fillStyle = '#776688';
+    ctx.font = '13px monospace';
+    ctx.fillText(desc, 150, y);
+  });
+
+  // Footer
+  ctx.strokeStyle = '#331155';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(32, H - 36); ctx.lineTo(W - 32, H - 36); ctx.stroke();
+  ctx.fillStyle = '#554466';
+  ctx.font = '13px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Pitch rod RIGHT  ·  Volume loop LEFT  ·  stand still', W / 2, H - 14);
 
   instrTex.needsUpdate = true;
 }
 drawInstructions();
 
 const instrMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.72, 0.54),
+  new THREE.PlaneGeometry(0.72, 0.63),
   new THREE.MeshBasicMaterial({ map: instrTex, transparent: true, depthWrite: false })
 );
-// Float the panel to the left of the mirror, at eye height
-instrMesh.position.set(-1.1, 1.35, MIRROR_Z + 0.01);
+// Close to the theremin stand, left side, at comfortable reading height
+instrMesh.position.set(-0.72, 1.35, STAND_Z - 0.05);
 scene.add(instrMesh);
 
 // ─── Hand joint visuals ───────────────────────────────────────────────────────
@@ -594,7 +634,7 @@ renderer.setAnimationLoop((timestamp, frame) => {
     // ── Audio control ──
     if (audioCtx && oscillator) {
       const now = audioCtx.currentTime;
-      const smoothTime = 0.03; // 30ms smoothing — snappier response
+      const smoothTime = 0.05; // 50ms — slight portamento glide
 
       if (rightTracked && rightWrist !== null) {
         // Real theremin: right hand X distance from pitch rod → frequency
@@ -611,10 +651,12 @@ renderer.setAnimationLoop((timestamp, frame) => {
       }
 
       if (leftTracked && leftWrist !== null) {
-        // Real theremin: left hand height above volume loop → gain
+        // Real theremin: left hand height above volume loop → gain + timbre
         const targetGain = yToGain(leftWrist.y);
         currentGain = targetGain;
         gainNode.gain.setTargetAtTime(targetGain * 0.6, now, smoothTime);
+        // Dynamic brightness: louder = brighter (300 Hz dark → 3200 Hz full)
+        if (filterNode) filterNode.frequency.setTargetAtTime(300 + targetGain * 2900, now, smoothTime);
 
         // Color left hand by volume (dark=quiet → bright=loud)
         const t = targetGain;
