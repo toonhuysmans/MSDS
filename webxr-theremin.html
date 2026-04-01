@@ -41,7 +41,8 @@ import { Reflector } from 'three/addons/objects/Reflector.js';
 let audioCtx = null;
 let oscillator = null;
 let gainNode = null;
-let filterNode = null; // lowpass — cutoff tracks volume for dynamic brightness
+let filterNode = null; // lowpass — cutoff driven by left hand openness
+let lfoGain = null;    // vibrato depth — driven by right hand openness
 
 function initAudio() {
   if (audioCtx) return;
@@ -57,10 +58,9 @@ function initAudio() {
   }
   convolver.buffer = irBuf;
 
-  // Vibrato: main LFO (~5.5 Hz) modulated by a slow secondary LFO (0.25 Hz)
-  // so the vibrato rate drifts slightly — more organic, less mechanical
+  // Vibrato: main LFO (~5.5 Hz) with drifting rate, depth driven by right hand openness
   const lfo = audioCtx.createOscillator();
-  const lfoGain = audioCtx.createGain();
+  lfoGain = audioCtx.createGain(); // exposed globally
   lfo.frequency.value = 5.5;
   lfoGain.gain.value = 0;
   lfo.connect(lfoGain);
@@ -113,10 +113,6 @@ function initAudio() {
   oscillator.start();
   osc2.start();
 
-  // Vibrato ramps in after 1.5s (natural theremin behaviour — player settles first)
-  setTimeout(() => {
-    lfoGain.gain.setTargetAtTime(3.5, audioCtx.currentTime, 0.8);
-  }, 1500);
 }
 
 // Pitch: right hand X → frequency  (real theremin: hand moves toward/away from vertical rod)
@@ -344,9 +340,9 @@ function drawInstructions() {
   ctx.fillText('SOUND BEHAVIOUR', W / 2, 316);
 
   const notes = [
-    ['Timbre',    'sawtooth wave — richer harmonics than sine'],
-    ['Brightness','tone gets brighter as you play louder'],
-    ['Vibrato',   'builds in after ~1.5s, rate drifts naturally'],
+    ['Timbre',    'sawtooth — richer harmonics than sine'],
+    ['Brightness','LEFT openness: fist=dark, open hand=bright'],
+    ['Vibrato',   'RIGHT openness: fist=none, open hand=full'],
     ['Portamento','pitch glides smoothly between notes'],
   ];
   ctx.textAlign = 'left';
@@ -377,8 +373,9 @@ const instrMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(0.72, 0.63),
   new THREE.MeshBasicMaterial({ map: instrTex, transparent: true, depthWrite: false })
 );
-// Close to the theremin stand, left side, at comfortable reading height
 instrMesh.position.set(-0.72, 1.35, STAND_Z - 0.05);
+// Angle toward the player standing at z≈0 (rotate around Y so normal faces player)
+instrMesh.rotation.y = Math.atan2(0.72, Math.abs(STAND_Z - 0.05));
 scene.add(instrMesh);
 
 // ─── Hand joint visuals ───────────────────────────────────────────────────────
@@ -527,13 +524,17 @@ function drawHUD() {
 drawHUD();
 
 // ─── Hand update ─────────────────────────────────────────────────────────────
-// Returns { x, y } of index fingertip, or null if not tracked
+// Returns { x, y, openness } from index fingertip + hand spread, or null if not tracked.
+// openness: 0 = closed fist, 1 = fully open hand (avg fingertip-to-wrist distance).
+const OPENNESS_TIPS = ['index-finger-tip','middle-finger-tip','ring-finger-tip','pinky-finger-tip'];
 function updateHand(src, frame, refSpace) {
   const isRight = src.handedness === 'right';
   const meshes  = isRight ? rightMeshes : leftMeshes;
   const orb     = isRight ? rightOrb    : leftOrb;
 
   let tipPos = null;
+  let wristP = null;
+  const tipPositions = {};
 
   for (const jointName of HAND_JOINTS) {
     const jointSpace = src.hand.get(jointName);
@@ -545,18 +546,36 @@ function updateHand(src, frame, refSpace) {
       const p = pose.transform.position;
       m.position.set(p.x, p.y, p.z);
       m.visible = true;
-      if (jointName === 'index-finger-tip') {
+      if (jointName === 'wrist') {
+        wristP = p;
+      } else if (jointName === 'index-finger-tip') {
         tipPos = { x: p.x, y: p.y };
         orb.position.set(p.x, p.y, p.z);
         orb.visible = true;
       }
+      if (OPENNESS_TIPS.includes(jointName)) tipPositions[jointName] = p;
     } else {
       m.visible = false;
       if (jointName === 'index-finger-tip') orb.visible = false;
     }
   }
 
-  return tipPos;
+  if (!tipPos) return null;
+
+  // Openness: average fingertip distance from wrist, normalised (0.06m=fist, 0.17m=open)
+  let openness = 0;
+  if (wristP) {
+    let sum = 0, cnt = 0;
+    for (const t of OPENNESS_TIPS) {
+      if (tipPositions[t]) {
+        sum += Math.hypot(tipPositions[t].x - wristP.x, tipPositions[t].y - wristP.y, tipPositions[t].z - wristP.z);
+        cnt++;
+      }
+    }
+    if (cnt > 0) openness = Math.max(0, Math.min(1, (sum / cnt - 0.06) / 0.11));
+  }
+
+  return { ...tipPos, openness };
 }
 
 // ─── WebXR setup ─────────────────────────────────────────────────────────────
@@ -637,10 +656,13 @@ renderer.setAnimationLoop((timestamp, frame) => {
       const smoothTime = 0.05; // 50ms — slight portamento glide
 
       if (rightTracked && rightWrist !== null) {
-        // Real theremin: right hand X distance from pitch rod → frequency
+        // Pitch: right index fingertip X → frequency
         const targetFreq = xToFreq(rightWrist.x);
         currentFreq = targetFreq;
         oscillator.frequency.setTargetAtTime(targetFreq, now, smoothTime);
+
+        // Vibrato depth: right hand openness (fist=none, open=full)
+        if (lfoGain) lfoGain.gain.setTargetAtTime(rightWrist.openness * 6, now, 0.12);
 
         // Color right hand by pitch (red=low → violet=high)
         const t = (targetFreq - FREQ_MIN) / (FREQ_MAX - FREQ_MIN);
@@ -651,12 +673,13 @@ renderer.setAnimationLoop((timestamp, frame) => {
       }
 
       if (leftTracked && leftWrist !== null) {
-        // Real theremin: left hand height above volume loop → gain + timbre
+        // Volume: left index fingertip height
         const targetGain = yToGain(leftWrist.y);
         currentGain = targetGain;
         gainNode.gain.setTargetAtTime(targetGain * 0.6, now, smoothTime);
-        // Dynamic brightness: louder = brighter (300 Hz dark → 3200 Hz full)
-        if (filterNode) filterNode.frequency.setTargetAtTime(300 + targetGain * 2900, now, smoothTime);
+
+        // Brightness (filter cutoff): left hand openness (fist=dark, open=bright)
+        if (filterNode) filterNode.frequency.setTargetAtTime(300 + leftWrist.openness * 2900, now, 0.08);
 
         // Color left hand by volume (dark=quiet → bright=loud)
         const t = targetGain;
