@@ -560,12 +560,12 @@ function driveVRMFingers(vrmInstance, frame, refSpace, handedness, xrHand) {
     const calParentKey = prefix + parentXRJoint;
 
     if (isCalibrated && calibRest[calParentKey] && calibRest[calKey]) {
-      // Same world-frame retargeting formula as body joints
+      // World-frame retargeting — no Y180 for fingers: hand joints face laterally (±X world),
+      // unlike body joints which face forward (±Z). Y180 only needed for Z-flipping.
       const corrected = calibRest[calParentKey].clone()
         .multiply(parentQuat.clone().invert())
         .multiply(jointQuat)
         .multiply(calibRest[calKey].clone().invert());
-      corrected.premultiply(_Qy180).multiply(_Qy180inv);
       boneNode.quaternion.copy(corrected);
     } else {
       // Fallback: raw relative rotation before calibration

@@ -562,7 +562,8 @@ function driveVRMFingers(frame, refSpace, handedness, xrHand, pose) {
         .multiply(parentQuat.clone().invert())
         .multiply(jointQuat)
         .multiply(calibRest[calKey].clone().invert());
-      corrected.premultiply(_Qy180).multiply(_Qy180inv);
+      // No Y180 for fingers: hand joints face laterally (±X world), unlike body joints
+      // which face forward (±Z). Y180 only needed for Z-flipping, not X.
     } else {
       corrected = parentQuat.clone().invert().multiply(jointQuat);
     }
