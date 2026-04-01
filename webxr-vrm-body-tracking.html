@@ -276,11 +276,8 @@ loader.load(
 
     vrm = gltf.userData.vrm;
 
-    // VRM1 characters face +Z by default.
-    // WebXR initial forward = -Z, mirror is at z = MIRROR_Z.
-    // Rotate 180° so character faces the mirror (-Z) and the user
-    // sees their avatar's front face reflected back.
-    vrm.scene.rotation.y = Math.PI;
+    // This avatar faces -Z by default (toward the mirror), so no rotation needed.
+    vrm.scene.rotation.y = 0;
 
     // Disable lookAt so the VRM doesn't override head orientation toward the camera
     vrm.lookAt = undefined;
