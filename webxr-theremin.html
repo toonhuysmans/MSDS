@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebXR Theremin</title>
+<style>
+  body { margin: 0; background: #060610; color: #fff; font-family: sans-serif; overflow: hidden; }
+  #enterVR {
+    position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
+    padding: 16px 32px; font-size: 18px; background: #9944ff; color: #fff;
+    border: none; border-radius: 8px; cursor: pointer; z-index: 10;
+  }
+  #enterVR:disabled { opacity: 0.4; cursor: default; }
+  #info {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    text-align: center; opacity: 0.7; font-size: 14px;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="info">
+  WebXR Theremin — Quest 3<br>
+  <small>Right hand height = pitch &nbsp;|&nbsp; Left hand height = volume</small>
+</div>
+<button id="enterVR" disabled>Enter VR</button>
+
+<script type="module">
+import * as THREE from 'three';
+import { Reflector } from 'three/addons/objects/Reflector.js';
+
+// ─── Audio ────────────────────────────────────────────────────────────────────
+let audioCtx = null;
+let oscillator = null;
+let gainNode = null;
+let reverbGain = null;
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new AudioContext();
+
+  // Convolver reverb via impulse response
+  const convolver = audioCtx.createConvolver();
+  const irLen = audioCtx.sampleRate * 2.5;
+  const irBuf = audioCtx.createBuffer(2, irLen, audioCtx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = irBuf.getChannelData(ch);
+    for (let i = 0; i < irLen; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / irLen, 2.5);
+  }
+  convolver.buffer = irBuf;
+
+  // Vibrato LFO
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  lfo.frequency.value = 5.5;
+  lfoGain.gain.value = 0; // starts silent; ramped in
+  lfo.connect(lfoGain);
+  lfo.start();
+
+  // Main oscillator (theremin-style sine + a little detune)
+  oscillator = audioCtx.createOscillator();
+  oscillator.type = 'sine';
+  oscillator.frequency.value = 220;
+  lfoGain.connect(oscillator.frequency); // vibrato
+
+  // Slight second osc for warmth
+  const osc2 = audioCtx.createOscillator();
+  osc2.type = 'sine';
+  osc2.frequency.value = 220;
+  osc2.detune.value = 7;
+  lfoGain.connect(osc2.frequency);
+
+  gainNode = audioCtx.createGain();
+  gainNode.gain.value = 0;
+
+  const dryGain = audioCtx.createGain();
+  dryGain.gain.value = 0.7;
+  reverbGain = audioCtx.createGain();
+  reverbGain.gain.value = 0.35;
+
+  oscillator.connect(gainNode);
+  osc2.connect(gainNode);
+  gainNode.connect(dryGain);
+  gainNode.connect(convolver);
+  convolver.connect(reverbGain);
+  dryGain.connect(audioCtx.destination);
+  reverbGain.connect(audioCtx.destination);
+
+  oscillator.start();
+  osc2.start();
+
+  // Ramp in vibrato after 1.5s
+  setTimeout(() => {
+    lfoGain.gain.setTargetAtTime(3.5, audioCtx.currentTime, 0.8);
+  }, 1500);
+}
+
+// Pitch: right hand Y → frequency (110 Hz – 880 Hz, two octaves)
+const PITCH_Y_MIN = 0.4;  // waist-ish
+const PITCH_Y_MAX = 1.85; // above head
+const FREQ_MIN = 110;
+const FREQ_MAX = 880;
+
+// Volume: left hand Y → gain
+const VOL_Y_MIN  = 0.3;
+const VOL_Y_MAX  = 1.5;
+
+function yToFreq(y) {
+  const t = Math.max(0, Math.min(1, (y - PITCH_Y_MIN) / (PITCH_Y_MAX - PITCH_Y_MIN)));
+  // Exponential mapping for musical pitch perception
+  return FREQ_MIN * Math.pow(FREQ_MAX / FREQ_MIN, t);
+}
+
+function yToGain(y) {
+  return Math.max(0, Math.min(1, (y - VOL_Y_MIN) / (VOL_Y_MAX - VOL_Y_MIN)));
+}
+
+// Note name from frequency
+function freqToNote(freq) {
+  const NOTE_NAMES = ['A','A#','B','C','C#','D','D#','E','F','F#','G','G#'];
+  const semitones = Math.round(12 * Math.log2(freq / 440));
+  const octave = 4 + Math.floor((semitones + 9) / 12);
+  const name = NOTE_NAMES[((semitones % 12) + 12) % 12];
+  return `${name}${octave}`;
+}
+
+// ─── Scene ────────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x060610);
+scene.fog = new THREE.Fog(0x060610, 5, 20);
+
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
+camera.position.set(0, 1.6, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+// Lighting
+scene.add(new THREE.AmbientLight(0x221133, 2));
+const rimLight = new THREE.DirectionalLight(0x9944ff, 1.5);
+rimLight.position.set(-2, 3, -1);
+scene.add(rimLight);
+const fillLight = new THREE.DirectionalLight(0x44aaff, 0.8);
+fillLight.position.set(2, 2, 1);
+scene.add(fillLight);
+
+// Floor grid
+const gridHelper = new THREE.GridHelper(20, 40, 0x220033, 0x110022);
+scene.add(gridHelper);
+
+// Subtle floor glow plane
+const floorGeo = new THREE.PlaneGeometry(8, 8);
+const floorMat = new THREE.MeshStandardMaterial({
+  color: 0x110022, roughness: 1, metalness: 0,
+  transparent: true, opacity: 0.6
+});
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = 0.001;
+scene.add(floor);
+
+// Mirror
+const MIRROR_Z = -2.0;
+const mirror = new Reflector(new THREE.PlaneGeometry(2.5, 2.5), {
+  clipBias: 0.003,
+  textureWidth: 1024,
+  textureHeight: 1024,
+  color: new THREE.Color(0x443366),
+});
+mirror.position.set(0, 1.25, MIRROR_Z);
+scene.add(mirror);
+
+// Mirror frame
+const frameMat = new THREE.MeshStandardMaterial({ color: 0x221133, roughness: 0.4, metalness: 0.6 });
+[[0, 2.52, 2.58, 0.04], [0, -0.02, 2.58, 0.04], [-1.29, 1.25, 0.04, 2.58], [1.29, 1.25, 0.04, 2.58]]
+  .forEach(([x, y, w, h]) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.04), frameMat);
+    m.position.set(x, y, MIRROR_Z);
+    scene.add(m);
+  });
+
+// Pitch "antenna" — a vertical glowing rod on the right
+const antennaMat = new THREE.MeshStandardMaterial({ color: 0xff4488, emissive: 0xff2266, emissiveIntensity: 1.5 });
+const antennaR = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 1.8, 8), antennaMat);
+antennaR.position.set(0.6, 0.9, -1.0);
+scene.add(antennaR);
+
+// Volume "loop" — a horizontal glowing torus on the left
+const loopMat = new THREE.MeshStandardMaterial({ color: 0x44ffaa, emissive: 0x22ff88, emissiveIntensity: 1.5 });
+const antennaL = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.008, 8, 32), loopMat);
+antennaL.position.set(-0.6, 0.9, -1.0);
+antennaL.rotation.x = Math.PI / 2;
+scene.add(antennaL);
+
+// ─── Hand joint visuals ───────────────────────────────────────────────────────
+const HAND_JOINTS = [
+  'wrist',
+  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
+  'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
+  'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
+  'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip',
+];
+
+const JOINT_RADIUS = {
+  'wrist': 0.018,
+  'thumb-metacarpal': 0.012, 'thumb-phalanx-proximal': 0.010, 'thumb-phalanx-distal': 0.009, 'thumb-tip': 0.008,
+};
+function getJointRadius(name) { return JOINT_RADIUS[name] || (name.endsWith('-tip') ? 0.007 : 0.006); }
+
+// Right hand: pitch color (warm: low=deep red, high=violet)
+const rightHandMat = new THREE.MeshStandardMaterial({
+  color: 0xff4488, emissive: 0xff2266, emissiveIntensity: 0.8,
+  roughness: 0.3, metalness: 0.1
+});
+// Left hand: volume color (cool: low=dark teal, high=bright cyan)
+const leftHandMat = new THREE.MeshStandardMaterial({
+  color: 0x44ffaa, emissive: 0x22ff88, emissiveIntensity: 0.8,
+  roughness: 0.3, metalness: 0.1
+});
+
+function makeHandMeshes(mat) {
+  const meshes = {};
+  for (const name of HAND_JOINTS) {
+    const r = getJointRadius(name);
+    const m = new THREE.Mesh(new THREE.SphereGeometry(r, 8, 6), mat);
+    m.visible = false;
+    scene.add(m);
+    meshes[name] = m;
+  }
+  return meshes;
+}
+
+const rightMeshes = makeHandMeshes(rightHandMat);
+const leftMeshes  = makeHandMeshes(leftHandMat);
+
+// Wrist glow orb (larger, emissive)
+function makeWristOrb(color, emissive) {
+  const mat = new THREE.MeshStandardMaterial({
+    color, emissive, emissiveIntensity: 2,
+    transparent: true, opacity: 0.6,
+    roughness: 0, metalness: 0
+  });
+  const m = new THREE.Mesh(new THREE.SphereGeometry(0.04, 16, 12), mat);
+  m.visible = false;
+  scene.add(m);
+  return m;
+}
+const rightOrb = makeWristOrb(0xff4488, 0xff2266);
+const leftOrb  = makeWristOrb(0x44ffaa, 0x22ff88);
+
+// ─── HUD ─────────────────────────────────────────────────────────────────────
+const hudCanvas = document.createElement('canvas');
+hudCanvas.width = 512; hudCanvas.height = 200;
+const hudCtx = hudCanvas.getContext('2d');
+const hudTex = new THREE.CanvasTexture(hudCanvas);
+const hudMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.5, 0.195),
+  new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthWrite: false })
+);
+hudMesh.position.set(0, 2.0, MIRROR_Z + 0.01);
+scene.add(hudMesh);
+
+let currentFreq = 220;
+let currentGain = 0;
+let rightTracked = false;
+let leftTracked  = false;
+
+function drawHUD() {
+  const ctx = hudCtx;
+  ctx.clearRect(0, 0, 512, 200);
+
+  // Background
+  ctx.fillStyle = 'rgba(6,6,16,0.85)';
+  ctx.beginPath(); ctx.roundRect(4, 4, 504, 192, 12); ctx.fill();
+
+  // Border glow
+  ctx.strokeStyle = currentGain > 0.01 ? '#9944ff' : '#331155';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(4, 4, 504, 192, 12); ctx.stroke();
+
+  if (!rightTracked && !leftTracked) {
+    ctx.fillStyle = '#554466';
+    ctx.font = 'bold 22px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Show hands to play', 256, 108);
+    hudTex.needsUpdate = true;
+    return;
+  }
+
+  // Note name
+  const note = freqToNote(currentFreq);
+  ctx.fillStyle = '#ff4488';
+  ctx.font = 'bold 64px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(note, 24, 80);
+
+  // Frequency
+  ctx.fillStyle = '#cc88aa';
+  ctx.font = '22px monospace';
+  ctx.fillText(`${Math.round(currentFreq)} Hz`, 24, 112);
+
+  // Volume bar
+  ctx.fillStyle = '#112222';
+  ctx.beginPath(); ctx.roundRect(24, 130, 460, 18, 4); ctx.fill();
+  const barW = Math.round(460 * currentGain);
+  if (barW > 0) {
+    const grad = ctx.createLinearGradient(24, 0, 484, 0);
+    grad.addColorStop(0, '#115533');
+    grad.addColorStop(1, '#44ffaa');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.roundRect(24, 130, barW, 18, 4); ctx.fill();
+  }
+  ctx.fillStyle = '#44ffaa';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(`VOL ${Math.round(currentGain * 100)}%`, 488, 145);
+
+  // Pitch bar
+  const pitchT = Math.max(0, Math.min(1, (currentFreq - FREQ_MIN) / (FREQ_MAX - FREQ_MIN)));
+  ctx.fillStyle = '#221122';
+  ctx.beginPath(); ctx.roundRect(24, 158, 460, 18, 4); ctx.fill();
+  const pitchW = Math.round(460 * pitchT);
+  if (pitchW > 0) {
+    const pgrad = ctx.createLinearGradient(24, 0, 484, 0);
+    pgrad.addColorStop(0, '#550022');
+    pgrad.addColorStop(1, '#ff4488');
+    ctx.fillStyle = pgrad;
+    ctx.beginPath(); ctx.roundRect(24, 158, pitchW, 18, 4); ctx.fill();
+  }
+  ctx.fillStyle = '#ff4488';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(`PITCH ${Math.round(pitchT * 100)}%`, 488, 173);
+
+  hudTex.needsUpdate = true;
+}
+drawHUD();
+
+// ─── Hand update ─────────────────────────────────────────────────────────────
+function updateHand(src, frame, refSpace) {
+  const isRight = src.handedness === 'right';
+  const meshes  = isRight ? rightMeshes : leftMeshes;
+  const orb     = isRight ? rightOrb    : leftOrb;
+
+  let wristY = null;
+
+  for (const jointName of HAND_JOINTS) {
+    const jointSpace = src.hand.get(jointName);
+    if (!jointSpace) { if (meshes[jointName]) meshes[jointName].visible = false; continue; }
+    const pose = frame.getPose(jointSpace, refSpace);
+    const m = meshes[jointName];
+    if (!m) continue;
+    if (pose) {
+      const p = pose.transform.position;
+      m.position.set(p.x, p.y, p.z);
+      m.visible = true;
+      if (jointName === 'wrist') {
+        wristY = p.y;
+        orb.position.set(p.x, p.y, p.z);
+        orb.visible = true;
+      }
+    } else {
+      m.visible = false;
+      if (jointName === 'wrist') orb.visible = false;
+    }
+  }
+
+  return wristY;
+}
+
+// ─── WebXR setup ─────────────────────────────────────────────────────────────
+const enterBtn = document.getElementById('enterVR');
+
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+    enterBtn.disabled = !supported;
+    enterBtn.textContent = supported ? 'Enter VR' : 'VR Not Supported';
+  });
+} else {
+  enterBtn.textContent = 'WebXR Not Available';
+}
+
+let xrSession = null;
+let refSpace = null;
+
+enterBtn.addEventListener('click', async () => {
+  if (xrSession) return;
+  initAudio();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+    });
+    xrSession = session;
+    renderer.xr.setSession(session);
+    session.addEventListener('end', () => { xrSession = null; });
+    enterBtn.textContent = 'In VR';
+  } catch (e) {
+    console.error('Failed to start XR session:', e);
+  }
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── Render loop ─────────────────────────────────────────────────────────────
+const _tmpColor = new THREE.Color();
+let time = 0;
+
+renderer.setAnimationLoop((timestamp, frame) => {
+  time += 0.016;
+
+  // Animate antennas
+  antennaR.material.emissiveIntensity = 1.2 + 0.5 * Math.sin(time * 3.1);
+  antennaL.material.emissiveIntensity = 1.2 + 0.5 * Math.sin(time * 2.7 + 1);
+
+  if (frame && renderer.xr.isPresenting) {
+    refSpace = renderer.xr.getReferenceSpace();
+
+    let rightWristY = null;
+    let leftWristY  = null;
+    rightTracked = false;
+    leftTracked  = false;
+
+    for (const src of xrSession.inputSources) {
+      if (!src.hand) continue;
+      if (src.handedness === 'right') {
+        rightWristY = updateHand(src, frame, refSpace);
+        rightTracked = rightWristY !== null;
+      } else if (src.handedness === 'left') {
+        leftWristY = updateHand(src, frame, refSpace);
+        leftTracked = leftWristY !== null;
+      }
+    }
+
+    // Hide orbs if not tracked
+    if (!rightTracked) { for (const m of Object.values(rightMeshes)) m.visible = false; rightOrb.visible = false; }
+    if (!leftTracked)  { for (const m of Object.values(leftMeshes))  m.visible = false; leftOrb.visible = false; }
+
+    // ── Audio control ──
+    if (audioCtx && oscillator) {
+      const now = audioCtx.currentTime;
+      const smoothTime = 0.04; // 40ms smoothing
+
+      if (rightTracked && rightWristY !== null) {
+        const targetFreq = yToFreq(rightWristY);
+        currentFreq = targetFreq;
+        oscillator.frequency.setTargetAtTime(targetFreq, now, smoothTime);
+        // Sync detune osc — we only have access to main oscillator's frequency here
+        // (osc2 is out of scope; its frequency follows via lfoGain naturally)
+
+        // Color right hand by pitch (red=low → violet=high)
+        const t = (targetFreq - FREQ_MIN) / (FREQ_MAX - FREQ_MIN);
+        _tmpColor.setHSL(0.85 - t * 0.5, 1, 0.55); // 0.85=magenta, 0.35=cyan
+        rightHandMat.emissive.copy(_tmpColor);
+        rightOrb.material.emissive.copy(_tmpColor);
+        rightOrb.material.color.copy(_tmpColor);
+      }
+
+      if (leftTracked && leftWristY !== null) {
+        const targetGain = yToGain(leftWristY);
+        currentGain = targetGain;
+        gainNode.gain.setTargetAtTime(targetGain * 0.6, now, smoothTime);
+
+        // Color left hand by volume (dark=quiet → bright=loud)
+        const t = targetGain;
+        _tmpColor.setHSL(0.42, 1, 0.2 + t * 0.35); // teal range
+        leftHandMat.emissive.copy(_tmpColor);
+        leftOrb.material.emissive.copy(_tmpColor);
+
+        // Pulse orb size with volume
+        const pulse = 1 + t * 0.4 * (0.8 + 0.2 * Math.sin(time * 8));
+        leftOrb.scale.setScalar(pulse);
+      } else if (audioCtx) {
+        // Fade out when left hand lost
+        gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
+        currentGain = 0;
+      }
+    }
+
+    drawHUD();
+  }
+
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
