@@ -283,9 +283,10 @@ const frameMat = new THREE.MeshStandardMaterial({ color: 0x333344, roughness: 0.
 // Load VRM
 // ============================================================
 let vrm = null;
-let vrmNaturalHeadY = 1.6;  // head bone Y in model space at T-pose (sampled at load)
-let vrmNaturalHipsY = 0.9;  // hips bone Y
-let vrmNaturalFootY = 0.0;  // lowest foot bone Y (floor reference in model space)
+let vrmNaturalHeadY   = 1.6;  // head bone Y in model space at T-pose (sampled at load)
+let vrmNaturalHipsY   = 0.9;  // hips bone Y
+let vrmNaturalFootY   = 0.0;  // lowest toes bone Y (floor reference in model space)
+let vrmNaturalArmSpan = 1.6;  // wrist-to-wrist distance at T-pose in model space
 
 const loader = new GLTFLoader();
 loader.register(parser => new VRMLoaderPlugin(parser));
@@ -317,7 +318,12 @@ loader.load(
     leftToesNode?.getWorldPosition(_tv);  const lyf = _tv.y;
     rightToesNode?.getWorldPosition(_tv); const ryf = _tv.y;
     vrmNaturalFootY = Math.min(lyf, ryf);
-    console.log('VRM loaded — headY:', vrmNaturalHeadY.toFixed(3), 'hipsY:', vrmNaturalHipsY.toFixed(3), 'footY:', vrmNaturalFootY.toFixed(3));
+    // Arm span: wrist-to-wrist distance at T-pose
+    const _tv2 = new THREE.Vector3();
+    vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftHand).getWorldPosition(_tv);
+    vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightHand).getWorldPosition(_tv2);
+    vrmNaturalArmSpan = _tv.distanceTo(_tv2);
+    console.log('VRM loaded — headY:', vrmNaturalHeadY.toFixed(3), 'hipsY:', vrmNaturalHipsY.toFixed(3), 'footY:', vrmNaturalFootY.toFixed(3), 'armSpan:', vrmNaturalArmSpan.toFixed(3));
   },
   (progress) => {
     const pct = progress.total > 0 ? Math.round(progress.loaded / progress.total * 100) : '...';
@@ -440,18 +446,28 @@ function captureTPose(body, frame, refSpace, inputSources) {
   }
   isCalibrated = n > 0;
 
-  // Scale VRM using body-tracked head joint Y (matches vrmNaturalHeadY semantically)
+  // Scale VRM: Y from head height, X/Z from wrist-to-wrist arm span at T-pose
   if (vrm && isCalibrated) {
-    const headSpace = body.get('head');
-    if (headSpace) {
-      const headPose = frame.getPose(headSpace, refSpace);
-      if (headPose) {
-        const realHeadY = headPose.transform.position.y;
-        const vrmHeight = vrmNaturalHeadY - vrmNaturalFootY;
-        if (realHeadY > 0.5 && vrmHeight > 0.01) {
-          vrm.scene.scale.setScalar(realHeadY / vrmHeight);
-          console.log(`Height scale: ${(realHeadY/vrmHeight).toFixed(3)} (head Y: ${realHeadY.toFixed(3)} m)`);
-        }
+    const headSpace  = body.get('head');
+    const lWristSpace = body.get('left-hand-wrist');
+    const rWristSpace = body.get('right-hand-wrist');
+    if (headSpace && lWristSpace && rWristSpace) {
+      const headPose  = frame.getPose(headSpace,  refSpace);
+      const lWristPose = frame.getPose(lWristSpace, refSpace);
+      const rWristPose = frame.getPose(rWristSpace, refSpace);
+      if (headPose && lWristPose && rWristPose) {
+        const realHeadY  = headPose.transform.position.y;
+        const vrmHeight  = vrmNaturalHeadY - vrmNaturalFootY;
+        const yScale     = realHeadY > 0.5 && vrmHeight > 0.01 ? realHeadY / vrmHeight : 1;
+
+        const lp = lWristPose.transform.position;
+        const rp = rWristPose.transform.position;
+        const realArmSpan = Math.sqrt((lp.x-rp.x)**2 + (lp.y-rp.y)**2 + (lp.z-rp.z)**2);
+        const xzScale    = realArmSpan > 0.3 && vrmNaturalArmSpan > 0.01
+          ? realArmSpan / vrmNaturalArmSpan : yScale;
+
+        vrm.scene.scale.set(xzScale, yScale, xzScale);
+        console.log(`Scale — Y: ${yScale.toFixed(3)}, XZ: ${xzScale.toFixed(3)} (height: ${realHeadY.toFixed(2)} m, span: ${realArmSpan.toFixed(2)} m)`);
       }
     }
   }
