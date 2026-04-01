@@ -104,14 +104,15 @@ function initAudio() {
 }
 
 // Pitch: right hand Y → frequency (110 Hz – 880 Hz, two octaves)
-const PITCH_Y_MIN = 0.4;  // waist-ish
-const PITCH_Y_MAX = 1.85; // above head
+// Range is waist → shoulder — no need to raise arm above head
+const PITCH_Y_MIN = 0.65; // hip / waist level
+const PITCH_Y_MAX = 1.45; // shoulder level
 const FREQ_MIN = 110;
 const FREQ_MAX = 880;
 
-// Volume: left hand Y → gain
-const VOL_Y_MIN  = 0.3;
-const VOL_Y_MAX  = 1.5;
+// Volume: left hand Y → gain (slightly tighter range)
+const VOL_Y_MIN  = 0.55;
+const VOL_Y_MAX  = 1.35;
 
 function yToFreq(y) {
   const t = Math.max(0, Math.min(1, (y - PITCH_Y_MIN) / (PITCH_Y_MAX - PITCH_Y_MIN)));
@@ -190,18 +191,161 @@ const frameMat = new THREE.MeshStandardMaterial({ color: 0x221133, roughness: 0.
     scene.add(m);
   });
 
-// Pitch "antenna" — a vertical glowing rod on the right
+// ─── Theremin stand — compact, right in front ─────────────────────────────
+const STAND_Z = -0.55; // close enough to reach without moving feet
+const STAND_Y = 0.78;  // tabletop height
+
+// Box body
+const boxMat = new THREE.MeshStandardMaterial({ color: 0x1a0a2e, roughness: 0.4, metalness: 0.7 });
+const boxMesh = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.10, 0.28), boxMat);
+boxMesh.position.set(0, STAND_Y, STAND_Z);
+scene.add(boxMesh);
+
+// Decorative panel stripe
+const stripeMat = new THREE.MeshStandardMaterial({ color: 0x9944ff, emissive: 0x6622cc, emissiveIntensity: 0.8, roughness: 0.2, metalness: 0.9 });
+const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.73, 0.012, 0.02), stripeMat);
+stripe.position.set(0, STAND_Y + 0.04, STAND_Z - 0.13);
+scene.add(stripe);
+
+// ─── Pitch antenna — vertical rod on the RIGHT ────────────────────────────
+// Spans the full play range (PITCH_Y_MIN to PITCH_Y_MAX) so the rod is the ruler
+const ANTENNA_HEIGHT = PITCH_Y_MAX - PITCH_Y_MIN; // 0.8m
+const ANTENNA_CENTER_Y = (PITCH_Y_MIN + PITCH_Y_MAX) / 2;
+
 const antennaMat = new THREE.MeshStandardMaterial({ color: 0xff4488, emissive: 0xff2266, emissiveIntensity: 1.5 });
-const antennaR = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 1.8, 8), antennaMat);
-antennaR.position.set(0.6, 0.9, -1.0);
+const antennaR = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, ANTENNA_HEIGHT, 8), antennaMat);
+antennaR.position.set(0.28, ANTENNA_CENTER_Y, STAND_Z);
 scene.add(antennaR);
 
-// Volume "loop" — a horizontal glowing torus on the left
+// Antenna base stub (from tabletop to play range bottom)
+const stubR = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.009, PITCH_Y_MIN - STAND_Y - 0.05, 8), antennaMat);
+stubR.position.set(0.28, STAND_Y + 0.05 + (PITCH_Y_MIN - STAND_Y - 0.05) / 2, STAND_Z);
+scene.add(stubR);
+
+// Range markers on pitch antenna (one tick per octave step)
+const tickMat = new THREE.MeshStandardMaterial({ color: 0xff88bb, emissive: 0xff4488, emissiveIntensity: 1 });
+for (let i = 0; i <= 4; i++) {
+  const t = i / 4;
+  const y = PITCH_Y_MIN + t * ANTENNA_HEIGHT;
+  const tick = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.004, 8), tickMat);
+  tick.position.set(0.28, y, STAND_Z);
+  scene.add(tick);
+}
+
+// ─── Volume loop — horizontal torus on the LEFT ───────────────────────────
+const VOL_HEIGHT = VOL_Y_MAX - VOL_Y_MIN;
+const VOL_CENTER_Y = (VOL_Y_MIN + VOL_Y_MAX) / 2;
+
 const loopMat = new THREE.MeshStandardMaterial({ color: 0x44ffaa, emissive: 0x22ff88, emissiveIntensity: 1.5 });
-const antennaL = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.008, 8, 32), loopMat);
-antennaL.position.set(-0.6, 0.9, -1.0);
+const antennaL = new THREE.Mesh(new THREE.TorusGeometry(0.15, 0.007, 8, 32), loopMat);
+antennaL.position.set(-0.28, VOL_CENTER_Y, STAND_Z);
 antennaL.rotation.x = Math.PI / 2;
 scene.add(antennaL);
+
+// Vertical guide line for volume (shows the range visually)
+const volGuideMat = new THREE.MeshStandardMaterial({ color: 0x44ffaa, emissive: 0x22ff88, emissiveIntensity: 0.6, transparent: true, opacity: 0.5 });
+const volGuide = new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.003, VOL_HEIGHT, 6), volGuideMat);
+volGuide.position.set(-0.28, VOL_CENTER_Y, STAND_Z);
+scene.add(volGuide);
+
+// Stub below loop
+const stubL = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.009, VOL_Y_MIN - STAND_Y - 0.05, 8), loopMat);
+stubL.position.set(-0.28, STAND_Y + 0.05 + (VOL_Y_MIN - STAND_Y - 0.05) / 2, STAND_Z);
+scene.add(stubL);
+
+// ─── Instruction panel ────────────────────────────────────────────────────
+const instrCanvas = document.createElement('canvas');
+instrCanvas.width = 640; instrCanvas.height = 480;
+const instrCtx = instrCanvas.getContext('2d');
+const instrTex = new THREE.CanvasTexture(instrCanvas);
+
+function drawInstructions() {
+  const ctx = instrCtx;
+  const W = 640, H = 480;
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  ctx.fillStyle = 'rgba(6,6,22,0.92)';
+  ctx.beginPath(); ctx.roundRect(4, 4, W - 8, H - 8, 16); ctx.fill();
+  ctx.strokeStyle = '#441166';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(4, 4, W - 8, H - 8, 16); ctx.stroke();
+
+  // Title
+  ctx.fillStyle = '#cc88ff';
+  ctx.font = 'bold 28px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('HOW TO PLAY', W / 2, 46);
+
+  // Divider
+  ctx.strokeStyle = '#331155';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(32, 60); ctx.lineTo(W - 32, 60); ctx.stroke();
+
+  // ── Right hand / Pitch ──────────────────────────────────
+  const colR = 160, colL = 480;
+
+  ctx.fillStyle = '#ff4488';
+  ctx.font = 'bold 20px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('RIGHT HAND', colR, 94);
+  ctx.fillText('PITCH', colR, 118);
+
+  // Arrow up/down
+  ctx.fillStyle = '#ff4488';
+  ctx.font = '48px sans-serif';
+  ctx.fillText('↕', colR, 188);
+
+  ctx.fillStyle = '#cc6688';
+  ctx.font = '15px monospace';
+  ctx.fillText('SHOULDER  →  A5  880Hz', colR, 230);
+  ctx.fillText('─────────────────', colR, 248);
+  ctx.fillText('HIP        →  A2  110Hz', colR, 266);
+
+  // Divider between columns
+  ctx.strokeStyle = '#331155';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(W / 2, 70); ctx.lineTo(W / 2, H - 32); ctx.stroke();
+
+  // ── Left hand / Volume ──────────────────────────────────
+  ctx.fillStyle = '#44ffaa';
+  ctx.font = 'bold 20px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('LEFT HAND', colL, 94);
+  ctx.fillText('VOLUME', colL, 118);
+
+  ctx.fillStyle = '#44ffaa';
+  ctx.font = '48px sans-serif';
+  ctx.fillText('↕', colL, 188);
+
+  ctx.fillStyle = '#22aa66';
+  ctx.font = '15px monospace';
+  ctx.fillText('RAISE  →  LOUDER', colL, 230);
+  ctx.fillText('─────────────────', colL, 248);
+  ctx.fillText('LOWER  →  QUIETER', colL, 266);
+
+  // ── Tip ─────────────────────────────────────────────────
+  ctx.strokeStyle = '#331155';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(32, H - 64); ctx.lineTo(W - 32, H - 64); ctx.stroke();
+
+  ctx.fillStyle = '#776688';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Stand still — everything is within arm\'s reach', W / 2, H - 40);
+  ctx.fillText('Pitch rod on your RIGHT · Volume loop on your LEFT', W / 2, H - 18);
+
+  instrTex.needsUpdate = true;
+}
+drawInstructions();
+
+const instrMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.72, 0.54),
+  new THREE.MeshBasicMaterial({ map: instrTex, transparent: true, depthWrite: false })
+);
+// Float the panel to the left of the mirror, at eye height
+instrMesh.position.set(-1.1, 1.35, MIRROR_Z + 0.01);
+scene.add(instrMesh);
 
 // ─── Hand joint visuals ───────────────────────────────────────────────────────
 const HAND_JOINTS = [
@@ -269,7 +413,7 @@ const hudMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(0.5, 0.195),
   new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthWrite: false })
 );
-hudMesh.position.set(0, 2.0, MIRROR_Z + 0.01);
+hudMesh.position.set(1.1, 1.35, MIRROR_Z + 0.01); // right side of mirror
 scene.add(hudMesh);
 
 let currentFreq = 220;
