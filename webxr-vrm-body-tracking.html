@@ -324,6 +324,9 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
             .multiply(parentQuat.clone().invert())
             .multiply(jointQuat)
             .multiply(calibRest[xrJoint].clone().invert());
+          // Fix X/Z inversion: conjugate by 180° around world Y → (x,y,z,w)→(-x,y,-z,w)
+          const Qy180 = new THREE.Quaternion(0, 1, 0, 0);
+          corrected.premultiply(Qy180).multiply(Qy180.clone().invert());
           if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
           finalQuat = corrected;
         } else {
@@ -337,6 +340,9 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
       // Root joint (hips) — world-frame delta: child × Ct_child⁻¹
       if (isCalibrated && calibRest[xrJoint]) {
         const corrected = jointQuat.clone().multiply(calibRest[xrJoint].clone().invert());
+        // Fix X/Z inversion: conjugate by 180° around world Y → (x,y,z,w)→(-x,y,-z,w)
+        const Qy180 = new THREE.Quaternion(0, 1, 0, 0);
+        corrected.premultiply(Qy180).multiply(Qy180.clone().invert());
         if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
         finalQuat = corrected;
       } else {
