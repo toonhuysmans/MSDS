@@ -149,6 +149,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor'); // y=0 is the physical floor
 document.body.appendChild(renderer.domElement);
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.7));
@@ -178,12 +179,28 @@ const ft = 0.04;
     scene.add(m);
   });
 
-// --- Load Soldier model ---
+// --- Soldier model state ---
 let soldierModel = null;
-let soldierSkeleton = null;
-let bonesByXRJoint = {};       // xr joint name → THREE.Bone
 let mirrorModel = null;
-let mirrorBonesByXRJoint = {};
+let bonesByXRJoint = {};         // xr joint name → THREE.Bone (main)
+let mirrorBonesByXRJoint = {};   // xr joint name → THREE.Bone (mirror)
+
+// Rest-pose data captured at load time (T-pose)
+const boneRestLocal = {};              // xrJoint → THREE.Quaternion (bone local quat at T-pose)
+const parentBoneRestWorld = {};        // xrJoint → THREE.Quaternion (parent world quat at T-pose)
+const mirrorBoneRestLocal = {};
+const mirrorParentBoneRestWorld = {};
+
+// Natural model-space heights (used for scaling and grounding)
+let soldierNaturalHeadY = 1.8;
+let soldierNaturalToesY = 0.0;
+let soldierNaturalHipsY = 0.95;
+
+// --- T-pose calibration state ---
+const calibRest = {};           // xrJoint → THREE.Quaternion at user T-pose
+let isCalibrated = false;
+let calibCountdownEnd = 0;
+let thumbstickWasPressed = false;
 
 const loader = new GLTFLoader();
 loader.load(SOLDIER_URL, (gltf) => {
@@ -191,17 +208,16 @@ loader.load(SOLDIER_URL, (gltf) => {
 
   // --- Main soldier (driven by body tracking) ---
   soldierModel = gltf.scene;
-  soldierModel.visible = false; // hidden until body tracking activates
+  soldierModel.visible = false;
   scene.add(soldierModel);
 
-  // Stop any animations
   soldierModel.traverse((child) => {
     if (child.isSkinnedMesh) {
       child.frustumCulled = false;
     }
   });
 
-  // Find skeleton and map bones
+  // Map bones for the main model
   soldierModel.traverse((child) => {
     if (child.isBone) {
       const xrName = MIXAMO_TO_XR[child.name];
@@ -213,7 +229,42 @@ loader.load(SOLDIER_URL, (gltf) => {
 
   console.log('Mapped bones:', Object.keys(bonesByXRJoint).length);
 
+  // Force world matrices up to date so we can sample rest-pose data
+  soldierModel.updateMatrixWorld(true);
+
+  // Capture T-pose rest data for each mapped bone
+  for (const xrJoint of BONE_ORDER_XR) {
+    const bone = bonesByXRJoint[xrJoint];
+    if (!bone || !bone.parent) continue;
+    boneRestLocal[xrJoint] = bone.quaternion.clone();
+    parentBoneRestWorld[xrJoint] = bone.parent.getWorldQuaternion(new THREE.Quaternion());
+  }
+
+  // Sample natural heights from bone world positions
+  const _tmpPos = new THREE.Vector3();
+  if (bonesByXRJoint['head']) {
+    bonesByXRJoint['head'].getWorldPosition(_tmpPos);
+    soldierNaturalHeadY = _tmpPos.y;
+  }
+  if (bonesByXRJoint['hips']) {
+    bonesByXRJoint['hips'].getWorldPosition(_tmpPos);
+    soldierNaturalHipsY = _tmpPos.y;
+  }
+  let leftToeY = 0, rightToeY = 0;
+  if (bonesByXRJoint['left-foot-ball']) {
+    bonesByXRJoint['left-foot-ball'].getWorldPosition(_tmpPos);
+    leftToeY = _tmpPos.y;
+  }
+  if (bonesByXRJoint['right-foot-ball']) {
+    bonesByXRJoint['right-foot-ball'].getWorldPosition(_tmpPos);
+    rightToeY = _tmpPos.y;
+  }
+  soldierNaturalToesY = Math.min(leftToeY, rightToeY);
+
+  console.log(`Natural heights — head: ${soldierNaturalHeadY.toFixed(3)}, hips: ${soldierNaturalHipsY.toFixed(3)}, toes: ${soldierNaturalToesY.toFixed(3)}`);
+
   // --- Mirror soldier (cloned, flipped across mirror plane) ---
+  // Clone BEFORE any frame renders so scale is still (1,1,1), making rest capture safe.
   mirrorModel = soldierModel.clone();
   mirrorModel.visible = false;
   scene.add(mirrorModel);
@@ -230,6 +281,16 @@ loader.load(SOLDIER_URL, (gltf) => {
     }
   });
 
+  // Force world matrices for mirror model too, then capture rest data
+  mirrorModel.updateMatrixWorld(true);
+
+  for (const xrJoint of BONE_ORDER_XR) {
+    const bone = mirrorBonesByXRJoint[xrJoint];
+    if (!bone || !bone.parent) continue;
+    mirrorBoneRestLocal[xrJoint] = bone.quaternion.clone();
+    mirrorParentBoneRestWorld[xrJoint] = bone.parent.getWorldQuaternion(new THREE.Quaternion());
+  }
+
 }, (progress) => {
   const pct = progress.total > 0 ? Math.round(progress.loaded / progress.total * 100) : '...';
   document.getElementById('loading').textContent = `Loading soldier... ${pct}%`;
@@ -239,15 +300,54 @@ loader.load(SOLDIER_URL, (gltf) => {
 });
 
 // --- Body tracking state ---
-const _parentInvQ = new THREE.Quaternion();
-const _xrQ = new THREE.Quaternion();
+// Cached quaternion temporaries (minimise GC)
+const _parentInvQ      = new THREE.Quaternion();
+const _parentRestQ     = new THREE.Quaternion();
+const _boneRestQ       = new THREE.Quaternion();
+const _xrRestQ         = new THREE.Quaternion();
+const _xrCurQ          = new THREE.Quaternion();
+const _tmpPos          = new THREE.Vector3();
+
+// Capture the user's T-pose from live XR body data and store per-joint quaternions.
+// Also computes a height scale and applies it to both soldier models.
+function captureTPose(body, frame, refSpace) {
+  let headY = null;
+
+  for (const xrJoint of BONE_ORDER_XR) {
+    const jointSpace = body.get(xrJoint);
+    if (!jointSpace) continue;
+    const pose = frame.getPose(jointSpace, refSpace);
+    if (!pose) continue;
+    const q = pose.transform.orientation;
+    calibRest[xrJoint] = new THREE.Quaternion(q.x, q.y, q.z, q.w);
+
+    if (xrJoint === 'head') {
+      headY = pose.transform.position.y;
+    }
+  }
+
+  // Compute and apply height scale
+  if (headY !== null && soldierModel) {
+    const modelHeight = soldierNaturalHeadY - soldierNaturalToesY;
+    if (modelHeight > 0.001) {
+      const yScale = headY / modelHeight;
+      soldierModel.scale.set(yScale, yScale, yScale);
+      if (mirrorModel) mirrorModel.scale.set(yScale, yScale, yScale);
+      console.log(`T-pose calibrated. Head Y: ${headY.toFixed(3)}, scale: ${yScale.toFixed(3)}`);
+    }
+  }
+
+  isCalibrated = true;
+}
 
 // Drive skeleton bones in strict parent-first order.
-// After each bone, updateWorldMatrix() so children read the correct parent transform.
-function driveSkeleton(bonesMap, body, frame, refSpace) {
+// Formula (derived from VRM retargeting work):
+//   bone.quaternion = parentWorldCur⁻¹ × parentWorldRest × boneRestLocal × xrRest⁻¹ × xrCur
+// Falls back to naive formula when not yet calibrated.
+function driveSkeleton(bonesMap, restLocal, parentRestWorld, body, frame, refSpace) {
   for (const xrJoint of BONE_ORDER_XR) {
     const bone = bonesMap[xrJoint];
-    if (!bone) continue;
+    if (!bone || !bone.parent) continue;
 
     const jointSpace = body.get(xrJoint);
     if (!jointSpace) continue;
@@ -255,15 +355,37 @@ function driveSkeleton(bonesMap, body, frame, refSpace) {
     if (!pose) continue;
 
     const q = pose.transform.orientation;
-    _xrQ.set(q.x, q.y, q.z, q.w);
+    _xrCurQ.set(q.x, q.y, q.z, q.w);
 
-    // bone.localQuat = parentWorldQuat⁻¹ × xrWorldQuat
-    // parent's world matrix is already up-to-date because we process top-down.
-    bone.parent.getWorldQuaternion(_parentInvQ);
-    _parentInvQ.invert();
-    bone.quaternion.copy(_parentInvQ).multiply(_xrQ);
+    if (isCalibrated && calibRest[xrJoint] && restLocal[xrJoint] && parentRestWorld[xrJoint]) {
+      // Correct retargeting formula:
+      // bone.quaternion = parentWorldCur⁻¹ × parentWorldRest × boneRestLocal × xrRest⁻¹ × xrCur
 
-    // Propagate to this bone's world matrix so its children can read it.
+      // parentWorldCur — current world quat of parent (already up-to-date, top-down order)
+      bone.parent.getWorldQuaternion(_parentInvQ);
+      _parentInvQ.invert(); // now _parentInvQ = parentWorldCur⁻¹
+
+      _parentRestQ.copy(parentRestWorld[xrJoint]);   // parentWorldRest
+      _boneRestQ.copy(restLocal[xrJoint]);            // boneRestLocal
+
+      _xrRestQ.copy(calibRest[xrJoint]);
+      _xrRestQ.invert(); // xrRest⁻¹
+
+      // Compose: parentWorldCur⁻¹ × parentWorldRest × boneRestLocal × xrRest⁻¹ × xrCur
+      bone.quaternion
+        .copy(_parentInvQ)
+        .multiply(_parentRestQ)
+        .multiply(_boneRestQ)
+        .multiply(_xrRestQ)
+        .multiply(_xrCurQ);
+    } else {
+      // Naive fallback before calibration: parentWorldCur⁻¹ × xrCur
+      bone.parent.getWorldQuaternion(_parentInvQ);
+      _parentInvQ.invert();
+      bone.quaternion.copy(_parentInvQ).multiply(_xrCurQ);
+    }
+
+    // Propagate to this bone's world matrix so children can read it.
     bone.updateWorldMatrix(false, false);
   }
 }
@@ -278,21 +400,36 @@ function updateSoldierFromBody(frame, refSpace) {
 
   soldierModel.visible = true;
 
-  // Position model so hips end up at the tracked hips height
+  // Position model so hips are at the tracked hips height
   const hipsSpace = body.get('hips');
   if (hipsSpace) {
     const hipsPose = frame.getPose(hipsSpace, refSpace);
     if (hipsPose) {
       const hp = hipsPose.transform.position;
-      // 0.95 ≈ height of mixamorigHips bone above model origin (feet)
-      soldierModel.position.set(hp.x, hp.y - 0.95, hp.z);
+      soldierModel.position.set(
+        hp.x,
+        hp.y - soldierNaturalHipsY * soldierModel.scale.y,
+        hp.z
+      );
     }
   }
 
-  // Keep the GLTF root rotation (GLTFLoader may bake in a Z-up→Y-up correction).
-  soldierModel.updateWorldMatrix(false, false); // propagate new position to world matrix
+  soldierModel.updateWorldMatrix(false, false);
 
-  driveSkeleton(bonesByXRJoint, body, frame, refSpace);
+  driveSkeleton(bonesByXRJoint, boneRestLocal, parentBoneRestWorld, body, frame, refSpace);
+
+  // Dynamic grounding: shift model so lowest toe touches y=0
+  soldierModel.updateMatrixWorld(true);
+  let leftToeWorldY = 0, rightToeWorldY = 0;
+  if (bonesByXRJoint['left-foot-ball']) {
+    bonesByXRJoint['left-foot-ball'].getWorldPosition(_tmpPos);
+    leftToeWorldY = _tmpPos.y;
+  }
+  if (bonesByXRJoint['right-foot-ball']) {
+    bonesByXRJoint['right-foot-ball'].getWorldPosition(_tmpPos);
+    rightToeWorldY = _tmpPos.y;
+  }
+  soldierModel.position.y -= Math.min(leftToeWorldY, rightToeWorldY);
 
   // --- Mirror model ---
   if (mirrorModel) {
@@ -302,10 +439,24 @@ function updateSoldierFromBody(frame, refSpace) {
       soldierModel.position.y,
       2 * MIRROR_Z - soldierModel.position.z
     );
-    mirrorModel.scale.set(1, 1, -1);
+    // Mirror scale: preserve XY scale, flip Z
+    mirrorModel.scale.set(soldierModel.scale.x, soldierModel.scale.y, -soldierModel.scale.z);
     mirrorModel.updateWorldMatrix(false, false);
 
-    driveSkeleton(mirrorBonesByXRJoint, body, frame, refSpace);
+    driveSkeleton(mirrorBonesByXRJoint, mirrorBoneRestLocal, mirrorParentBoneRestWorld, body, frame, refSpace);
+
+    // Dynamic grounding for mirror model
+    mirrorModel.updateMatrixWorld(true);
+    let mirrorLeftToeY = 0, mirrorRightToeY = 0;
+    if (mirrorBonesByXRJoint['left-foot-ball']) {
+      mirrorBonesByXRJoint['left-foot-ball'].getWorldPosition(_tmpPos);
+      mirrorLeftToeY = _tmpPos.y;
+    }
+    if (mirrorBonesByXRJoint['right-foot-ball']) {
+      mirrorBonesByXRJoint['right-foot-ball'].getWorldPosition(_tmpPos);
+      mirrorRightToeY = _tmpPos.y;
+    }
+    mirrorModel.position.y -= Math.min(mirrorLeftToeY, mirrorRightToeY);
   }
 
   return true;
@@ -314,12 +465,12 @@ function updateSoldierFromBody(frame, refSpace) {
 // --- HUD ---
 const hudCanvas = document.createElement('canvas');
 hudCanvas.width = 400;
-hudCanvas.height = 100;
+hudCanvas.height = 120; // extra height for calibration line
 const hudCtx = hudCanvas.getContext('2d');
 const hudTexture = new THREE.CanvasTexture(hudCanvas);
 
 const hudMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.3, 0.075),
+  new THREE.PlaneGeometry(0.3, 0.09),
   new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.85 })
 );
 hudMesh.position.set(0, 1.8, -1.0);
@@ -330,24 +481,41 @@ let mappedBoneCount = 0;
 
 function drawHUD() {
   const ctx = hudCtx;
-  ctx.clearRect(0, 0, 400, 100);
+  ctx.clearRect(0, 0, 400, 120);
   ctx.fillStyle = 'rgba(10,10,20,0.7)';
   ctx.beginPath();
-  ctx.roundRect(0, 0, 400, 100, 10);
+  ctx.roundRect(0, 0, 400, 120, 10);
   ctx.fill();
 
   ctx.fillStyle = trackedJointCount > 0 ? '#44ff88' : '#ff4444';
   ctx.font = 'bold 20px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText(trackedJointCount > 0 ? 'Body Tracking Active' : 'No Body Tracking', 200, 30);
+  ctx.fillText(trackedJointCount > 0 ? 'Body Tracking Active' : 'No Body Tracking', 200, 28);
 
   ctx.fillStyle = '#888';
   ctx.font = '14px monospace';
-  ctx.fillText(`Joints: ${trackedJointCount}  |  Bones mapped: ${mappedBoneCount}`, 200, 55);
+  ctx.fillText(`Joints: ${trackedJointCount}  |  Bones mapped: ${mappedBoneCount}`, 200, 52);
 
   ctx.fillStyle = '#666';
   ctx.font = '11px sans-serif';
-  ctx.fillText('chrome://flags → WebXR Experiments', 200, 80);
+  ctx.fillText('chrome://flags → WebXR Experiments', 200, 73);
+
+  // Calibration status line
+  const now = performance.now();
+  if (calibCountdownEnd > 0 && now < calibCountdownEnd) {
+    const secsLeft = Math.ceil((calibCountdownEnd - now) / 1000);
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 13px monospace';
+    ctx.fillText(`Arms OUT — calibrating in ${secsLeft}s`, 200, 100);
+  } else if (isCalibrated) {
+    ctx.fillStyle = '#44ff88';
+    ctx.font = '13px monospace';
+    ctx.fillText('T-pose calibrated \u2713  (R-stick to redo)', 200, 100);
+  } else {
+    ctx.fillStyle = '#aaaaff';
+    ctx.font = '13px monospace';
+    ctx.fillText('Spread arms \u2192 press R THUMBSTICK', 200, 100);
+  }
 
   hudTexture.needsUpdate = true;
 }
@@ -386,7 +554,12 @@ enterBtn.addEventListener('click', async () => {
     });
     session.updateRenderState({ baseLayer: glLayer });
     renderer.xr.setSession(session);
-    session.addEventListener('end', () => { xrSession = null; });
+    session.addEventListener('end', () => {
+      xrSession = null;
+      isCalibrated = false;
+      calibCountdownEnd = 0;
+      thumbstickWasPressed = false;
+    });
     enterBtn.textContent = 'In VR';
   } catch (e) {
     console.error('Failed to start XR session:', e);
@@ -403,6 +576,27 @@ window.addEventListener('resize', () => {
 renderer.setAnimationLoop((timestamp, frame) => {
   if (frame && renderer.xr.isPresenting) {
     refSpace = renderer.xr.getReferenceSpace();
+
+    // --- Controller input: right thumbstick triggers T-pose calibration ---
+    if (xrSession) {
+      for (const src of xrSession.inputSources) {
+        if (!src.gamepad) continue;
+        if (src.handedness === 'right') {
+          const pressed = src.gamepad.buttons[3]?.pressed ?? false;
+          if (pressed && !thumbstickWasPressed && calibCountdownEnd === 0) {
+            calibCountdownEnd = performance.now() + 3000;
+            isCalibrated = false;
+          }
+          thumbstickWasPressed = pressed;
+        }
+      }
+    }
+
+    // Fire calibration when countdown expires
+    if (calibCountdownEnd > 0 && performance.now() >= calibCountdownEnd) {
+      calibCountdownEnd = 0;
+      if (frame.body) captureTPose(frame.body, frame, refSpace);
+    }
 
     updateSoldierFromBody(frame, refSpace);
 
