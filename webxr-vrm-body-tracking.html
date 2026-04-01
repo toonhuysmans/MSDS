@@ -558,13 +558,13 @@ function updateVRMFromBody(frame, refSpace, inputSources) {
 
   vrm.scene.visible = true;
 
-  // Position model: align model root so hips appear at tracked hips
+  // Position model: follow hips X/Z, pin feet to floor (y=0 in local-floor space)
   const hipsSpace = body.get('hips');
   if (hipsSpace) {
     const hipsPose = frame.getPose(hipsSpace, refSpace);
     if (hipsPose) {
       const hp = hipsPose.transform.position;
-      vrm.scene.position.set(hp.x, hp.y - vrmNaturalHipsY * vrm.scene.scale.y, hp.z);
+      vrm.scene.position.set(hp.x, -vrmNaturalFootY * vrm.scene.scale.y, hp.z);
     }
   }
 
