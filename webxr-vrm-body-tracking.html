@@ -317,9 +317,13 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
       if (parentQuat) {
         const rel = parentQuat.clone().invert().multiply(jointQuat);
         if (isCalibrated && calibRest[parentXRJoint] && calibRest[xrJoint]) {
-          const restRel = calibRest[parentXRJoint].clone().invert().multiply(calibRest[xrJoint]);
-          const corrected = restRel.invert().multiply(rel);
-          if (xrJoint.startsWith('left-')) corrected.conjugate();
+          // Express delta-from-T-pose in world frame (VRM normalized = world-aligned at T-pose).
+          // corrected = Ct_parent × parent⁻¹ × child × Ct_child⁻¹
+          // This is equivalent to: conjugate(Ct_parent) of (rel × restRel⁻¹)
+          const corrected = calibRest[parentXRJoint].clone()
+            .multiply(parentQuat.clone().invert())
+            .multiply(jointQuat)
+            .multiply(calibRest[xrJoint].clone().invert());
           if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
           finalQuat = corrected;
         } else {
@@ -330,9 +334,9 @@ function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
         if (isMain) debugJointStatus[xrJoint] = `✗ parent(${parentXRJoint}) null`;
       }
     } else {
-      // Root joint (hips) — world quat with calibration offset
+      // Root joint (hips) — world-frame delta: child × Ct_child⁻¹
       if (isCalibrated && calibRest[xrJoint]) {
-        const corrected = calibRest[xrJoint].clone().invert().multiply(jointQuat);
+        const corrected = jointQuat.clone().multiply(calibRest[xrJoint].clone().invert());
         if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
         finalQuat = corrected;
       } else {
