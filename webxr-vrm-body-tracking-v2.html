@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebXR VRM Body Tracking</title>
+<style>
+  body { margin: 0; background: #111; color: #fff; font-family: sans-serif; overflow: hidden; }
+  #enterVR {
+    position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
+    padding: 16px 32px; font-size: 18px; background: #44aaff; color: #000;
+    border: none; border-radius: 8px; cursor: pointer; z-index: 10;
+  }
+  #enterVR:disabled { opacity: 0.4; cursor: default; }
+  #info {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    text-align: center; opacity: 0.7; font-size: 14px; max-width: 500px;
+  }
+  #loading {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    font-size: 20px; opacity: 0.6;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2/lib/three-vrm.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="info">
+  WebXR VRM Body Tracking — Quest 3<br>
+  <small>Requires: Quest Browser → chrome://flags → enable "WebXR Experiments"</small>
+</div>
+<div id="loading">Loading VRM model...</div>
+<button id="enterVR" disabled>Enter VR</button>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { Reflector } from 'three/addons/objects/Reflector.js';
+import { Sky } from 'three/addons/objects/Sky.js';
+import { VRMLoaderPlugin, VRMHumanBoneName } from '@pixiv/three-vrm';
+
+// ============================================================
+// CONFIG
+// ============================================================
+// Replace with your own VRM from VRoid Hub for a custom avatar
+const VRM_URL = 'https://raw.githubusercontent.com/pixiv/three-vrm/dev/packages/three-vrm/examples/models/VRM1_Constraint_Twist_Sample.vrm';
+const MIRROR_Z = -2.0;  // Z position of the mirror wall
+
+// ============================================================
+// XR body joint → VRM humanoid bone name (full body)
+// ============================================================
+const XR_TO_VRM = {
+  'hips':             VRMHumanBoneName.Hips,
+  'spine-lower':      VRMHumanBoneName.Spine,
+  'spine-middle':     VRMHumanBoneName.Chest,
+  'spine-upper':      VRMHumanBoneName.UpperChest,
+  'neck':             VRMHumanBoneName.Neck,
+  'head':             VRMHumanBoneName.Head,
+  'left-shoulder':    VRMHumanBoneName.LeftShoulder,
+  'left-arm-upper':   VRMHumanBoneName.LeftUpperArm,
+  'left-arm-lower':   VRMHumanBoneName.LeftLowerArm,
+  'left-hand-wrist':  VRMHumanBoneName.LeftHand,
+  'right-shoulder':   VRMHumanBoneName.RightShoulder,
+  'right-arm-upper':  VRMHumanBoneName.RightUpperArm,
+  'right-arm-lower':  VRMHumanBoneName.RightLowerArm,
+  'right-hand-wrist': VRMHumanBoneName.RightHand,
+  'left-upper-leg':   VRMHumanBoneName.LeftUpperLeg,
+  'left-lower-leg':   VRMHumanBoneName.LeftLowerLeg,
+  'left-foot-ankle':  VRMHumanBoneName.LeftFoot,
+  'left-foot-ball':   VRMHumanBoneName.LeftToes,
+  'right-upper-leg':  VRMHumanBoneName.RightUpperLeg,
+  'right-lower-leg':  VRMHumanBoneName.RightLowerLeg,
+  'right-foot-ankle': VRMHumanBoneName.RightFoot,
+  'right-foot-ball':  VRMHumanBoneName.RightToes,
+};
+
+// Parent-first order so parent bones are driven before children
+const BONE_DRIVE_ORDER = [
+  'hips',
+  'spine-lower', 'spine-middle', 'spine-upper', 'neck', 'head',
+  'left-shoulder',   'left-arm-upper',   'left-arm-lower',   'left-hand-wrist',
+  'right-shoulder',  'right-arm-upper',  'right-arm-lower',  'right-hand-wrist',
+  'left-upper-leg',  'left-lower-leg',   'left-foot-ankle',  'left-foot-ball',
+  'right-upper-leg', 'right-lower-leg',  'right-foot-ankle', 'right-foot-ball',
+];
+
+// All joints to capture at T-pose (every driven joint + its XR parents)
+const CAL_JOINTS = [
+  'hips',
+  'spine-lower', 'spine-middle', 'spine-upper', 'neck', 'head',
+  'left-shoulder',   'left-arm-upper',   'left-arm-lower',   'left-hand-wrist',
+  'right-shoulder',  'right-arm-upper',  'right-arm-lower',  'right-hand-wrist',
+  'left-upper-leg',  'left-lower-leg',   'left-foot-ankle',  'left-foot-ball',
+  'right-upper-leg', 'right-lower-leg',  'right-foot-ankle', 'right-foot-ball',
+];
+
+// ============================================================
+// Hand tracking: XR joint → VRM finger bone, parent map
+// ============================================================
+// XRHand joint parent chain (shared for both hands, no side prefix)
+const HAND_JOINT_PARENT = {
+  'thumb-metacarpal':                      'wrist',
+  'thumb-phalanx-proximal':                'thumb-metacarpal',
+  'thumb-phalanx-distal':                  'thumb-phalanx-proximal',
+  'thumb-tip':                             'thumb-phalanx-distal',
+  'index-finger-metacarpal':               'wrist',
+  'index-finger-phalanx-proximal':         'index-finger-metacarpal',
+  'index-finger-phalanx-intermediate':     'index-finger-phalanx-proximal',
+  'index-finger-phalanx-distal':           'index-finger-phalanx-intermediate',
+  'middle-finger-metacarpal':              'wrist',
+  'middle-finger-phalanx-proximal':        'middle-finger-metacarpal',
+  'middle-finger-phalanx-intermediate':    'middle-finger-phalanx-proximal',
+  'middle-finger-phalanx-distal':          'middle-finger-phalanx-intermediate',
+  'ring-finger-metacarpal':                'wrist',
+  'ring-finger-phalanx-proximal':          'ring-finger-metacarpal',
+  'ring-finger-phalanx-intermediate':      'ring-finger-phalanx-proximal',
+  'ring-finger-phalanx-distal':            'ring-finger-phalanx-intermediate',
+  'pinky-finger-metacarpal':               'wrist',
+  'pinky-finger-phalanx-proximal':         'pinky-finger-metacarpal',
+  'pinky-finger-phalanx-intermediate':     'pinky-finger-phalanx-proximal',
+  'pinky-finger-phalanx-distal':           'pinky-finger-phalanx-intermediate',
+};
+
+// Drive order (parent-first within each finger)
+const HAND_DRIVE_ORDER = [
+  'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'index-finger-phalanx-proximal',  'index-finger-phalanx-intermediate',  'index-finger-phalanx-distal',
+  'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal',
+  'ring-finger-phalanx-proximal',   'ring-finger-phalanx-intermediate',   'ring-finger-phalanx-distal',
+  'pinky-finger-phalanx-proximal',  'pinky-finger-phalanx-intermediate',  'pinky-finger-phalanx-distal',
+];
+
+// XR hand joint → VRM bone, per side
+const HAND_TO_VRM = {
+  left: {
+    'thumb-phalanx-proximal':            VRMHumanBoneName.LeftThumbProximal,
+    'thumb-phalanx-distal':              VRMHumanBoneName.LeftThumbIntermediate,
+    'thumb-tip':                         VRMHumanBoneName.LeftThumbDistal,
+    'index-finger-phalanx-proximal':     VRMHumanBoneName.LeftIndexProximal,
+    'index-finger-phalanx-intermediate': VRMHumanBoneName.LeftIndexIntermediate,
+    'index-finger-phalanx-distal':       VRMHumanBoneName.LeftIndexDistal,
+    'middle-finger-phalanx-proximal':    VRMHumanBoneName.LeftMiddleProximal,
+    'middle-finger-phalanx-intermediate':VRMHumanBoneName.LeftMiddleIntermediate,
+    'middle-finger-phalanx-distal':      VRMHumanBoneName.LeftMiddleDistal,
+    'ring-finger-phalanx-proximal':      VRMHumanBoneName.LeftRingProximal,
+    'ring-finger-phalanx-intermediate':  VRMHumanBoneName.LeftRingIntermediate,
+    'ring-finger-phalanx-distal':        VRMHumanBoneName.LeftRingDistal,
+    'pinky-finger-phalanx-proximal':     VRMHumanBoneName.LeftLittleProximal,
+    'pinky-finger-phalanx-intermediate': VRMHumanBoneName.LeftLittleIntermediate,
+    'pinky-finger-phalanx-distal':       VRMHumanBoneName.LeftLittleDistal,
+  },
+  right: {
+    'thumb-phalanx-proximal':            VRMHumanBoneName.RightThumbProximal,
+    'thumb-phalanx-distal':              VRMHumanBoneName.RightThumbIntermediate,
+    'thumb-tip':                         VRMHumanBoneName.RightThumbDistal,
+    'index-finger-phalanx-proximal':     VRMHumanBoneName.RightIndexProximal,
+    'index-finger-phalanx-intermediate': VRMHumanBoneName.RightIndexIntermediate,
+    'index-finger-phalanx-distal':       VRMHumanBoneName.RightIndexDistal,
+    'middle-finger-phalanx-proximal':    VRMHumanBoneName.RightMiddleProximal,
+    'middle-finger-phalanx-intermediate':VRMHumanBoneName.RightMiddleIntermediate,
+    'middle-finger-phalanx-distal':      VRMHumanBoneName.RightMiddleDistal,
+    'ring-finger-phalanx-proximal':      VRMHumanBoneName.RightRingProximal,
+    'ring-finger-phalanx-intermediate':  VRMHumanBoneName.RightRingIntermediate,
+    'ring-finger-phalanx-distal':        VRMHumanBoneName.RightRingDistal,
+    'pinky-finger-phalanx-proximal':     VRMHumanBoneName.RightLittleProximal,
+    'pinky-finger-phalanx-intermediate': VRMHumanBoneName.RightLittleIntermediate,
+    'pinky-finger-phalanx-distal':       VRMHumanBoneName.RightLittleDistal,
+  },
+};
+
+// All hand joints needed for calibration (driven joints + their parents)
+const HAND_CAL_JOINTS = [
+  'wrist',
+  'thumb-metacarpal',            'thumb-phalanx-proximal',            'thumb-phalanx-distal',            'thumb-tip',
+  'index-finger-metacarpal',     'index-finger-phalanx-proximal',     'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal',
+  'middle-finger-metacarpal',    'middle-finger-phalanx-proximal',    'middle-finger-phalanx-intermediate','middle-finger-phalanx-distal',
+  'ring-finger-metacarpal',      'ring-finger-phalanx-proximal',      'ring-finger-phalanx-intermediate',  'ring-finger-phalanx-distal',
+  'pinky-finger-metacarpal',     'pinky-finger-phalanx-proximal',     'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal',
+];
+
+// Calibration state
+const calibRest = {};   // joint → THREE.Quaternion sampled at T-pose
+let isCalibrated = false;
+let calibCountdownEnd = 0;   // performance.now() timestamp when sampling fires; 0 = idle
+let thumbstickWasPressed = false;
+
+// XR body joint hierarchy — needed to compute relative rotations
+const XR_PARENT = {
+  'spine-lower':      'hips',
+  'spine-middle':     'spine-lower',
+  'spine-upper':      'spine-middle',
+  'neck':             'spine-upper',
+  'head':             'neck',
+  'left-shoulder':    'spine-upper',
+  'left-arm-upper':   'left-shoulder',
+  'left-arm-lower':   'left-arm-upper',
+  'left-hand-wrist':  'left-arm-lower',
+  'right-shoulder':   'spine-upper',
+  'right-arm-upper':  'right-shoulder',
+  'right-arm-lower':  'right-arm-upper',
+  'right-hand-wrist': 'right-arm-lower',
+  'left-upper-leg':   'hips',
+  'left-lower-leg':   'left-upper-leg',
+  'left-foot-ankle':  'left-lower-leg',
+  'left-foot-ball':   'left-foot-ankle',
+  'right-upper-leg':  'hips',
+  'right-lower-leg':  'right-upper-leg',
+  'right-foot-ankle': 'right-lower-leg',
+  'right-foot-ball':  'right-foot-ankle',
+};
+
+// ============================================================
+// Scene
+// ============================================================
+const scene = new THREE.Scene();
+
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+camera.position.set(0, 1.6, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');  // y=0 at floor level
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+dirLight.position.set(-10, 20, 10);
+scene.add(dirLight);
+
+// Sky
+const sky = new Sky();
+sky.scale.setScalar(450000);
+scene.add(sky);
+const skyUniforms = sky.material.uniforms;
+skyUniforms['turbidity'].value = 8;
+skyUniforms['rayleigh'].value = 2;
+skyUniforms['mieCoefficient'].value = 0.005;
+skyUniforms['mieDirectionalG'].value = 0.8;
+const sunPos = new THREE.Vector3();
+sunPos.setFromSphericalCoords(1, THREE.MathUtils.degToRad(75), THREE.MathUtils.degToRad(200));
+skyUniforms['sunPosition'].value.copy(sunPos);
+dirLight.position.copy(sunPos);
+
+// Floor
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.9, metalness: 0.0 })
+);
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+// ============================================================
+// Mirror wall — Reflector renders the scene from a reflected camera
+// so the mirror shows the real VRM pose, no second avatar needed.
+// ============================================================
+const mirror = new Reflector(new THREE.PlaneGeometry(2, 2.5), {
+  clipBias: 0.003,
+  textureWidth: 2048,
+  textureHeight: 2048,
+  color: new THREE.Color(0x889999),
+});
+mirror.position.set(0, 1.25, MIRROR_Z);
+scene.add(mirror);
+
+const frameMat = new THREE.MeshStandardMaterial({ color: 0x333344, roughness: 0.5, metalness: 0.3 });
+[[0, 2.52, 2.08, 0.04], [0, -0.02, 2.08, 0.04], [-1.04, 1.25, 0.04, 2.58], [1.04, 1.25, 0.04, 2.58]]
+  .forEach(([x, y, w, h]) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.04), frameMat);
+    m.position.set(x, y, MIRROR_Z);
+    scene.add(m);
+  });
+
+// ============================================================
+// Load VRM
+// ============================================================
+let vrm = null;
+let vrmNaturalHeadY = 1.6;  // head bone Y in model space at T-pose (sampled at load)
+let vrmNaturalHipsY = 0.9;  // hips bone Y
+let vrmNaturalFootY = 0.0;  // lowest foot bone Y (floor reference in model space)
+
+const loader = new GLTFLoader();
+loader.register(parser => new VRMLoaderPlugin(parser));
+
+loader.load(
+  VRM_URL,
+  (gltf) => {
+    document.getElementById('loading').style.display = 'none';
+
+    vrm = gltf.userData.vrm;
+
+    // VRM1 sample faces +Z; rotate 180° so it faces the mirror at -Z.
+    vrm.scene.rotation.y = Math.PI;
+
+    // Disable lookAt so the VRM doesn't override head orientation toward the camera
+    vrm.lookAt = undefined;
+
+    vrm.scene.visible = false;
+    scene.add(vrm.scene);
+
+    // Sample natural T-pose bone heights (Y is unaffected by the PI Y-rotation)
+    const _tv = new THREE.Vector3();
+    vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Head).getWorldPosition(_tv);
+    vrmNaturalHeadY = _tv.y;
+    vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Hips).getWorldPosition(_tv);
+    vrmNaturalHipsY = _tv.y;
+    const leftToesNode  = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftToes);
+    const rightToesNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightToes);
+    leftToesNode?.getWorldPosition(_tv);  const lyf = _tv.y;
+    rightToesNode?.getWorldPosition(_tv); const ryf = _tv.y;
+    vrmNaturalFootY = Math.min(lyf, ryf);
+    console.log('VRM loaded — headY:', vrmNaturalHeadY.toFixed(3), 'hipsY:', vrmNaturalHipsY.toFixed(3), 'footY:', vrmNaturalFootY.toFixed(3));
+  },
+  (progress) => {
+    const pct = progress.total > 0 ? Math.round(progress.loaded / progress.total * 100) : '...';
+    document.getElementById('loading').textContent = `Loading VRM... ${pct}%`;
+  },
+  (err) => {
+    console.error('VRM load error:', err);
+    document.getElementById('loading').textContent = 'Failed to load VRM model';
+  }
+);
+
+// ============================================================
+// Body tracking → VRM humanoid
+// ============================================================
+// Correct approach: relative rotation.
+// VRM normalized bones have identity quaternion at T-pose.
+// The right value to set is how much the joint rotates relative
+// to its XR parent joint — not the raw world quaternion.
+//   bone.quaternion = xrParentQuat⁻¹ × xrJointQuat
+//
+// For the root (hips), there is no XR parent so we use world quat directly.
+
+const _jointQ  = new THREE.Quaternion();
+const _parentQ = new THREE.Quaternion();
+const _Qy180   = new THREE.Quaternion(0, 1, 0, 0);   // 180° around world Y
+const _Qy180inv = new THREE.Quaternion(0, -1, 0, 0); // inverse
+
+function getXRQuat(body, frame, refSpace, jointName) {
+  const space = body.get(jointName);
+  if (!space) return null;
+  const pose = frame.getPose(space, refSpace);
+  if (!pose) return null;
+  const q = pose.transform.orientation;
+  return new THREE.Quaternion(q.x, q.y, q.z, q.w);
+}
+
+function getXRPose(body, frame, refSpace, jointName) {
+  const space = body.get(jointName);
+  if (!space) return null;
+  return frame.getPose(space, refSpace);
+}
+
+function getHandQuat(xrHand, frame, refSpace, jointName) {
+  const space = xrHand.get(jointName);
+  if (!space) return null;
+  const pose = frame.getJointPose(space, refSpace);
+  if (!pose) return null;
+  const q = pose.transform.orientation;
+  return new THREE.Quaternion(q.x, q.y, q.z, q.w);
+}
+
+// Pinch detection via thumb-tip / index-finger-tip distance (<3 cm)
+function detectHandPinch(xrHand, frame, refSpace) {
+  const ts = xrHand.get('thumb-tip');
+  const is = xrHand.get('index-finger-tip');
+  if (!ts || !is) return false;
+  const tp = frame.getJointPose(ts, refSpace);
+  const ip = frame.getJointPose(is, refSpace);
+  if (!tp || !ip) return false;
+  const p = tp.transform.position, q = ip.transform.position;
+  const d2 = (p.x-q.x)**2 + (p.y-q.y)**2 + (p.z-q.z)**2;
+  return d2 < 0.03 * 0.03;
+}
+
+// ============================================================
+// CSV recording
+// ============================================================
+// Columns: frame, timestamp_ms, joint, calibrated,
+//          xr_px,xr_py,xr_pz, xr_qx,xr_qy,xr_qz,xr_qw,
+//          vrm_qx,vrm_qy,vrm_qz,vrm_qw
+const CSV_HEADER = 'frame,timestamp_ms,joint,calibrated,' +
+  'xr_px,xr_py,xr_pz,xr_qx,xr_qy,xr_qz,xr_qw,' +
+  'vrm_qx,vrm_qy,vrm_qz,vrm_qw';
+const MAX_RECORD_FRAMES = 300;
+
+let isRecording = false;
+let csvRows = [];       // string rows accumulated during recording
+let csvFrameNum = 0;
+let leftThumbWasPressed = false;
+
+function toggleRecording() {
+  if (!isRecording) {
+    csvRows = [];
+    csvFrameNum = 0;
+    isRecording = true;
+    console.log('CSV recording started');
+  } else {
+    isRecording = false;
+    downloadCSV();
+  }
+}
+
+function downloadCSV() {
+  const blob = new Blob([CSV_HEADER + '\n' + csvRows.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `vrm-tracking-${Date.now()}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  console.log(`CSV downloaded: ${csvRows.length} rows`);
+}
+
+function captureTPose(body, frame, refSpace, inputSources) {
+  let n = 0;
+  for (const name of CAL_JOINTS) {
+    const q = getXRQuat(body, frame, refSpace, name);
+    if (q) { calibRest[name] = q; n++; }
+  }
+  // Capture hand joint T-pose quaternions; stored with side prefix (lh: / rh:)
+  if (inputSources) {
+    for (const src of inputSources) {
+      if (!src.hand) continue;
+      const prefix = src.handedness === 'left' ? 'lh:' : 'rh:';
+      for (const jname of HAND_CAL_JOINTS) {
+        const q = getHandQuat(src.hand, frame, refSpace, jname);
+        if (q) { calibRest[prefix + jname] = q; n++; }
+      }
+    }
+  }
+  isCalibrated = n > 0;
+
+  // Scale VRM using body-tracked head joint Y (matches vrmNaturalHeadY semantically)
+  if (vrm && isCalibrated) {
+    const headSpace = body.get('head');
+    if (headSpace) {
+      const headPose = frame.getPose(headSpace, refSpace);
+      if (headPose) {
+        const realHeadY = headPose.transform.position.y;
+        const vrmHeight = vrmNaturalHeadY - vrmNaturalFootY;
+        if (realHeadY > 0.5 && vrmHeight > 0.01) {
+          vrm.scene.scale.setScalar(realHeadY / vrmHeight);
+          console.log(`Height scale: ${(realHeadY/vrmHeight).toFixed(3)} (head Y: ${realHeadY.toFixed(3)} m)`);
+        }
+      }
+    }
+  }
+
+  console.log(`T-pose captured: ${n} joints (body + fingers)`);
+}
+
+// Debug state: per-joint status shown in HUD (only populated for main vrm, not mirror)
+const debugJointStatus = {};
+
+function driveVRM(vrmInstance, body, frame, refSpace, isMain) {
+  const ts = performance.now().toFixed(2);
+  for (const xrJoint of BONE_DRIVE_ORDER) {
+    const boneName = XR_TO_VRM[xrJoint];
+    if (!boneName) continue;
+
+    const boneNode = vrmInstance.humanoid.getNormalizedBoneNode(boneName);
+    if (!boneNode) continue;
+
+    const jointQuat = getXRQuat(body, frame, refSpace, xrJoint);
+    if (!jointQuat) {
+      if (isMain) debugJointStatus[xrJoint] = '✗ null';
+      continue;
+    }
+
+    let finalQuat = null;
+
+    const parentXRJoint = XR_PARENT[xrJoint];
+    if (parentXRJoint) {
+      const parentQuat = getXRQuat(body, frame, refSpace, parentXRJoint);
+      if (parentQuat) {
+        const rel = parentQuat.clone().invert().multiply(jointQuat);
+        if (isCalibrated && calibRest[parentXRJoint] && calibRest[xrJoint]) {
+          // Express delta-from-T-pose in world frame (VRM normalized = world-aligned at T-pose).
+          // corrected = Ct_parent × parent⁻¹ × child × Ct_child⁻¹
+          // This is equivalent to: conjugate(Ct_parent) of (rel × restRel⁻¹)
+          const corrected = calibRest[parentXRJoint].clone()
+            .multiply(parentQuat.clone().invert())
+            .multiply(jointQuat)
+            .multiply(calibRest[xrJoint].clone().invert());
+          // Fix X/Z inversion: conjugate by 180° around world Y → (x,y,z,w)→(-x,y,-z,w)
+          corrected.premultiply(_Qy180).multiply(_Qy180inv);
+          if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
+          finalQuat = corrected;
+        } else {
+          if (isMain) debugJointStatus[xrJoint] = `~raw w=${rel.w.toFixed(2)}`;
+          finalQuat = rel;
+        }
+      } else {
+        if (isMain) debugJointStatus[xrJoint] = `✗ parent(${parentXRJoint}) null`;
+      }
+    } else {
+      // Root joint (hips) — world-frame delta: child × Ct_child⁻¹
+      if (isCalibrated && calibRest[xrJoint]) {
+        const corrected = jointQuat.clone().multiply(calibRest[xrJoint].clone().invert());
+        // Fix X/Z inversion: conjugate by 180° around world Y → (x,y,z,w)→(-x,y,-z,w)
+        corrected.premultiply(_Qy180).multiply(_Qy180inv);
+        if (isMain) debugJointStatus[xrJoint] = `✓cal w=${corrected.w.toFixed(2)}`;
+        finalQuat = corrected;
+      } else {
+        if (isMain) debugJointStatus[xrJoint] = `✓ world w=${jointQuat.w.toFixed(2)}`;
+        finalQuat = jointQuat;
+      }
+    }
+
+    if (!finalQuat) continue;
+    boneNode.quaternion.copy(finalQuat);
+
+    // CSV recording — only for main VRM, one row per joint per frame
+    if (isMain && isRecording) {
+      const xrp = getXRPose(body, frame, refSpace, xrJoint);
+      const p = xrp ? xrp.transform.position : null;
+      const q = jointQuat;
+      const v = finalQuat;
+      const n = (x) => x != null ? x.toFixed(6) : '';
+      csvRows.push(
+        `${csvFrameNum},${ts},${xrJoint},${isCalibrated ? 1 : 0},` +
+        `${n(p?.x)},${n(p?.y)},${n(p?.z)},` +
+        `${n(q.x)},${n(q.y)},${n(q.z)},${n(q.w)},` +
+        `${n(v.x)},${n(v.y)},${n(v.z)},${n(v.w)}`
+      );
+    }
+  }
+}
+
+function driveVRMFingers(vrmInstance, frame, refSpace, handedness, xrHand) {
+  const prefix = handedness === 'left' ? 'lh:' : 'rh:';
+  const mapping = HAND_TO_VRM[handedness];
+  if (!mapping) return;
+
+  for (const xrJoint of HAND_DRIVE_ORDER) {
+    const boneName = mapping[xrJoint];
+    if (!boneName) continue;
+    const boneNode = vrmInstance.humanoid.getNormalizedBoneNode(boneName);
+    if (!boneNode) continue;
+
+    const parentXRJoint = HAND_JOINT_PARENT[xrJoint];
+    if (!parentXRJoint) continue;
+
+    const jointQuat  = getHandQuat(xrHand, frame, refSpace, xrJoint);
+    if (!jointQuat) continue;
+    const parentQuat = getHandQuat(xrHand, frame, refSpace, parentXRJoint);
+    if (!parentQuat) continue;
+
+    const calKey       = prefix + xrJoint;
+    const calParentKey = prefix + parentXRJoint;
+
+    if (isCalibrated && calibRest[calParentKey] && calibRest[calKey]) {
+      // Same world-frame retargeting formula as body joints
+      const corrected = calibRest[calParentKey].clone()
+        .multiply(parentQuat.clone().invert())
+        .multiply(jointQuat)
+        .multiply(calibRest[calKey].clone().invert());
+      corrected.premultiply(_Qy180).multiply(_Qy180inv);
+      boneNode.quaternion.copy(corrected);
+    } else {
+      // Fallback: raw relative rotation before calibration
+      boneNode.quaternion.copy(parentQuat.clone().invert().multiply(jointQuat));
+    }
+  }
+}
+
+const _groundVec = new THREE.Vector3();
+
+function updateVRMFromBody(frame, refSpace, inputSources) {
+  const body = frame.body;
+  if (!body || !vrm) return false;
+
+  vrm.scene.visible = true;
+
+  // Horizontal position from hips; Y will be grounded below
+  const hipsSpace = body.get('hips');
+  if (hipsSpace) {
+    const hipsPose = frame.getPose(hipsSpace, refSpace);
+    if (hipsPose) {
+      const hp = hipsPose.transform.position;
+      vrm.scene.position.set(hp.x, hp.y - vrmNaturalHipsY * vrm.scene.scale.y, hp.z);
+    }
+  }
+
+  driveVRM(vrm, body, frame, refSpace, true);
+
+  // Drive finger bones from hand tracking
+  if (inputSources) {
+    for (const src of inputSources) {
+      if (src.hand) driveVRMFingers(vrm, frame, refSpace, src.handedness, src.hand);
+    }
+  }
+
+  // Ground: after all bones are driven, shift scene so the lowest foot bone sits at y=0
+  vrm.scene.updateMatrixWorld(true);
+  const lFoot = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftToes);
+  const rFoot = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightToes);
+  if (lFoot && rFoot) {
+    lFoot.getWorldPosition(_groundVec); const ly = _groundVec.y;
+    rFoot.getWorldPosition(_groundVec); const ry = _groundVec.y;
+    vrm.scene.position.y -= Math.min(ly, ry);
+  }
+
+  return true;
+}
+
+// ============================================================
+// HUD
+// ============================================================
+const hudCanvas = document.createElement('canvas');
+hudCanvas.width = 512; hudCanvas.height = 600;
+const hudCtx = hudCanvas.getContext('2d');
+const hudTexture = new THREE.CanvasTexture(hudCanvas);
+const hudMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.25, 0.27),
+  new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.75 })
+);
+hudMesh.position.set(1.35, 1.5, MIRROR_Z);  // right side of mirror, same depth
+hudMesh.scale.set(1, 600/560, 1);
+scene.add(hudMesh);
+
+let jointCount = 0;
+let debugBtnsR = [];   // right controller button states
+let debugBtnsL = [];   // left controller button states
+let usingHandTracking = false;  // true when at least one hand input source is present
+
+function drawHUD() {
+  const ctx = hudCtx;
+  ctx.clearRect(0, 0, 512, 600);
+  ctx.fillStyle = 'rgba(10,10,20,0.85)';
+  ctx.beginPath(); ctx.roundRect(0, 0, 512, 600, 10); ctx.fill();
+
+  ctx.font = 'bold 18px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = jointCount > 0 ? '#44ff88' : '#ff4444';
+  ctx.fillText(jointCount > 0 ? 'Body Tracking Active' : 'No Body Tracking', 256, 24);
+
+  // Calibration status row
+  ctx.font = '13px monospace';
+  const remaining = calibCountdownEnd > 0
+    ? Math.ceil((calibCountdownEnd - performance.now()) / 1000) : 0;
+  if (remaining > 0) {
+    ctx.fillStyle = '#ffdd00';
+    ctx.fillText(`Arms OUT, fingers open — calibrating in ${remaining}…`, 256, 44);
+  } else if (isCalibrated) {
+    ctx.fillStyle = '#44ff88';
+    ctx.fillText('T-pose calibrated ✓  (R-stick to redo)', 256, 44);
+  } else {
+    ctx.fillStyle = '#ffaa44';
+    ctx.fillText('Spread arms & fingers → press R THUMBSTICK', 256, 44);
+  }
+
+  // Recording status
+  if (isRecording) {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 13px monospace';
+    ctx.fillText(`⏺ REC  ${csvFrameNum}/${MAX_RECORD_FRAMES}  (L-stick to stop)`, 256, 60);
+  }
+
+  // Controller button debug
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'left';
+  const rBtns = debugBtnsR.map((v,i) => v ? `[${i}]` : `${i}`).join(' ');
+  const lBtns = debugBtnsL.map((v,i) => v ? `[${i}]` : `${i}`).join(' ');
+  ctx.fillStyle = usingHandTracking ? '#aaffaa' : '#aaaaff';
+  ctx.fillText(usingHandTracking ? 'Hands active' : `R: ${rBtns || 'none'}`, 12, 76);
+  if (!usingHandTracking) ctx.fillText(`L: ${lBtns || 'none'}`, 12, 90);
+
+  // Per-joint status
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'left';
+  let y = 108;
+  for (const joint of BONE_DRIVE_ORDER) {
+    const status = debugJointStatus[joint] || '…';
+    const ok = status.startsWith('✓');
+    ctx.fillStyle = ok ? '#44ff88' : status.startsWith('~') ? '#ffaa44' : '#ff6644';
+    ctx.fillText(`${joint}: ${status}`, 12, y);
+    y += 21;
+  }
+
+  hudTexture.needsUpdate = true;
+}
+drawHUD();
+
+// ============================================================
+// WebXR session
+// ============================================================
+const enterBtn = document.getElementById('enterVR');
+
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+    if (supported) {
+      enterBtn.disabled = false;
+    } else {
+      enterBtn.textContent = 'VR Not Supported';
+    }
+  });
+} else {
+  enterBtn.textContent = 'WebXR Not Available';
+}
+
+let xrSession = null;
+let refSpace = null;
+
+enterBtn.addEventListener('click', async () => {
+  if (xrSession) return;
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['body-tracking', 'local-floor', 'bounded-floor', 'hand-tracking']
+    });
+    xrSession = session;
+    const gl = renderer.getContext();
+    const glLayer = new XRWebGLLayer(session, gl, {
+      framebufferScaleFactor: XRWebGLLayer.getNativeFramebufferScaleFactor(session),
+      antialias: true,
+    });
+    session.updateRenderState({ baseLayer: glLayer });
+    renderer.xr.setSession(session);
+    session.addEventListener('end', () => { xrSession = null; });
+    enterBtn.textContent = 'In VR';
+  } catch (e) {
+    console.error('Failed to start VR session:', e);
+    enterBtn.textContent = 'Error — see console';
+  }
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ============================================================
+// Render loop
+// ============================================================
+let prevTime = 0;
+
+renderer.setAnimationLoop((timestamp, frame) => {
+  const now = performance.now();
+  const dt = prevTime > 0 ? Math.min((now - prevTime) / 1000, 0.1) : 0.016;
+  prevTime = now;
+
+  if (frame && renderer.xr.isPresenting) {
+    refSpace = renderer.xr.getReferenceSpace();
+
+    // Input: right thumbstick = calibrate, left thumbstick = record (controllers only)
+    if (xrSession) {
+      usingHandTracking = false;
+      for (const src of xrSession.inputSources) {
+        if (src.hand) { usingHandTracking = true; continue; }
+        if (!src.gamepad) continue;
+        if (src.handedness === 'right') {
+          debugBtnsR = src.gamepad.buttons.map(b => b.pressed);
+          const pressed = src.gamepad.buttons[3]?.pressed ?? false;
+          if (pressed && !thumbstickWasPressed && calibCountdownEnd === 0) {
+            calibCountdownEnd = performance.now() + 3000;
+            isCalibrated = false;
+          }
+          thumbstickWasPressed = pressed;
+        } else if (src.handedness === 'left') {
+          debugBtnsL = src.gamepad.buttons.map(b => b.pressed);
+          const pressed = src.gamepad.buttons[3]?.pressed ?? false;
+          if (pressed && !leftThumbWasPressed) toggleRecording();
+          leftThumbWasPressed = pressed;
+        }
+      }
+    }
+
+    const inputSrcs = xrSession ? xrSession.inputSources : [];
+
+    // Fire calibration when countdown expires
+    if (calibCountdownEnd > 0 && performance.now() >= calibCountdownEnd) {
+      calibCountdownEnd = 0;
+      if (frame.body) captureTPose(frame.body, frame, refSpace, inputSrcs);
+    }
+
+    updateVRMFromBody(frame, refSpace, inputSrcs);
+
+    // CSV recording frame management
+    if (isRecording) {
+      csvFrameNum++;
+      if (csvFrameNum >= MAX_RECORD_FRAMES) {
+        isRecording = false;
+        downloadCSV();
+      }
+    }
+
+    // Count tracked joints for HUD
+    jointCount = 0;
+    if (frame.body) {
+      for (const [, jointSpace] of frame.body) {
+        if (frame.getPose(jointSpace, refSpace)) jointCount++;
+      }
+    }
+    drawHUD();
+  }
+
+  // VRM update: applies normalized pose to actual skeleton, spring bones, etc.
+  if (vrm) vrm.update(dt);
+
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
