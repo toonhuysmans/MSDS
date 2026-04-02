@@ -153,11 +153,42 @@ Try prompts like:
 - *"Add a script to this entity that detects hand collisions and plays a sound"*
 - *"Set up a proprioceptive offset experiment — mirror the right hand with a 10cm lateral shift"*
 
+#### Alternative: Claude CLI with API key
+
+If you prefer a terminal-based workflow or don't want to install Claude Desktop, you can use the **Claude CLI** (Claude Code) instead. The MCP server setup (Steps 1, 3, 4) is identical — only Step 2 differs.
+
+**Prerequisites:** an [Anthropic API key](https://console.anthropic.com/) (pay-per-use, no subscription required).
+
+**Install the CLI:**
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+**Configure the MCP server** (instead of editing `claude_desktop_config.json`, run once in your terminal):
+
+```bash
+# Windows
+claude mcp add playcanvas -- cmd /c npx tsx C:\editor-mcp-server\src\server.ts
+
+# macOS
+claude mcp add playcanvas -- npx tsx /Users/your-username/editor-mcp-server/src/server.ts
+```
+
+**Set your API key and launch:**
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...   # macOS/Linux
+set ANTHROPIC_API_KEY=sk-ant-...      # Windows
+
+claude
+```
+
+Claude CLI will pick up the MCP server automatically. Then follow Steps 3–4 (Chrome extension + PlayCanvas connect) as normal.
+
 #### Limitations
 
 - Only **one PlayCanvas Editor instance** can be connected at a time
 - Free tier may work but **Claude Pro** is recommended if you run into context length issues
-- Works with **Claude Desktop only** — not the claude.ai web interface
+- Works with **Claude Desktop** or **Claude CLI** — not the claude.ai web interface
 - Chrome extension requires **Google Chrome**
 
 **Resources:**
