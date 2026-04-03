@@ -140,6 +140,25 @@ const mat = new THREE.ShaderMaterial({
 scene.add(new THREE.Points(geom, mat));
 
 // ============================================================
+// Body segments to collide against [jointA, jointB, radius]
+// ============================================================
+const COLL_SEGS = [
+  ['hips',             'spine-middle',      0.20],
+  ['spine-middle',     'chest',             0.18],
+  ['chest',            'neck',              0.09],
+  ['left-shoulder',    'left-arm-upper',    0.08],
+  ['left-arm-upper',   'left-arm-lower',    0.07],
+  ['left-arm-lower',   'left-hand-wrist',   0.055],
+  ['right-shoulder',   'right-arm-upper',   0.08],
+  ['right-arm-upper',  'right-arm-lower',   0.07],
+  ['right-arm-lower',  'right-hand-wrist',  0.055],
+  ['left-upper-leg',   'left-lower-leg',    0.09],
+  ['left-lower-leg',   'left-foot-ankle',   0.07],
+  ['right-upper-leg',  'right-lower-leg',   0.09],
+  ['right-lower-leg',  'right-foot-ankle',  0.07],
+];
+
+// ============================================================
 // Armature — line skeleton drawn over the collision segments
 // ============================================================
 const armatureSegs = (COLL_SEGS.length + 1) * 2; // +1 for head-to-neck line
@@ -197,24 +216,6 @@ function setCap(j, ax, ay, az, bx, by, bz, r) {
   capBuf[o+3]=bx; capBuf[o+4]=by; capBuf[o+5]=bz;
   capBuf[o+6]=r;  capBuf[o+7]=r*r;
 }
-
-// Body segments to collide against [jointA, jointB, radius]
-// Radii are inflated slightly relative to the skin mesh for good particle coverage
-const COLL_SEGS = [
-  ['hips',             'spine-middle',      0.20],
-  ['spine-middle',     'chest',             0.18],
-  ['chest',            'neck',              0.09],
-  ['left-shoulder',    'left-arm-upper',    0.08],
-  ['left-arm-upper',   'left-arm-lower',    0.07],
-  ['left-arm-lower',   'left-hand-wrist',   0.055],
-  ['right-shoulder',   'right-arm-upper',   0.08],
-  ['right-arm-upper',  'right-arm-lower',   0.07],
-  ['right-arm-lower',  'right-hand-wrist',  0.055],
-  ['left-upper-leg',   'left-lower-leg',    0.09],
-  ['left-lower-leg',   'left-foot-ankle',   0.07],
-  ['right-upper-leg',  'right-lower-leg',   0.09],
-  ['right-lower-leg',  'right-foot-ankle',  0.07],
-];
 
 // ============================================================
 // Update capsule positions from body tracking
