@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebXR Particle Body</title>
+<style>
+  body { margin: 0; background: #020208; overflow: hidden; }
+  #enterVR {
+    position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
+    padding: 16px 32px; font-size: 18px; background: #44aaff; color: #000;
+    border: none; border-radius: 8px; cursor: pointer; z-index: 10;
+  }
+  #enterVR:disabled { opacity: 0.4; cursor: default; }
+  #info {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    text-align: center; color: #334; font-size: 13px; font-family: sans-serif;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="info">Particle Body — Quest 3 · chrome://flags → WebXR Experiments</div>
+<button id="enterVR" disabled>Enter VR</button>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ============================================================
+// Config — tune N down if frame-rate drops
+// ============================================================
+const N           = 200_000; // particle count
+const GRAVITY     = -9.8;    // m/s²
+const RESTITUTION = 0.55;    // bounciness
+const SPAWN_R     = 2.0;     // rain radius around body centre (m)
+const SPAWN_Y     = 4.5;     // rain spawn height (m above floor)
+const CULL_R2     = 1.6*1.6; // collision zone (XZ distance² from hips)
+
+// ============================================================
+// Pre-computed respawn table — avoids Math.random/cos in the hot loop
+// ============================================================
+const RBUF = 8192;
+const RD = new Float32Array(RBUF * 6); // dx, dz, vx, vy, vz, dy_offset
+for (let i = 0; i < RBUF; i++) {
+  const a = Math.random() * 6.28318;
+  const r = Math.sqrt(Math.random()) * SPAWN_R;
+  RD[i*6+0] = Math.cos(a) * r;
+  RD[i*6+1] = Math.sin(a) * r;
+  RD[i*6+2] = (Math.random()-0.5) * 0.5;
+  RD[i*6+3] = -1.5 - Math.random() * 2.5;
+  RD[i*6+4] = (Math.random()-0.5) * 0.5;
+  RD[i*6+5] = Math.random() * 2.0;  // spawn height jitter
+}
+let rdHead = 0;
+
+// ============================================================
+// Particle state (flat typed arrays)
+// ============================================================
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const col = new Float32Array(N * 3);
+const age = new Float32Array(N); // bounce flash [0..1], decays to 0
+
+let spawnCX = 0, spawnCZ = -0.5;
+
+// Spread initial particles throughout the column so rain starts immediately
+for (let i = 0; i < N; i++) {
+  const a = Math.random() * 6.28318, r = Math.sqrt(Math.random()) * SPAWN_R;
+  pos[i*3]   = spawnCX + Math.cos(a) * r;
+  pos[i*3+1] = Math.random() * SPAWN_Y;
+  pos[i*3+2] = spawnCZ + Math.sin(a) * r;
+  vel[i*3]   = (Math.random()-0.5) * 0.5;
+  vel[i*3+1] = -1.5 - Math.random() * 2.5;
+  vel[i*3+2] = (Math.random()-0.5) * 0.5;
+  col[i*3]   = 0.2; col[i*3+1] = 0.4; col[i*3+2] = 0.85;
+}
+
+// ============================================================
+// Scene
+// ============================================================
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x020208);
+scene.fog = new THREE.FogExp2(0x020208, 0.12);
+
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 30);
+camera.position.set(0, 1.6, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+
+// Subtle floor ring — visual ground reference
+const floorRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.05, 2.2, 80),
+  new THREE.MeshBasicMaterial({ color: 0x0a0a22, transparent: true, opacity: 0.6, side: THREE.DoubleSide })
+);
+floorRing.rotation.x = -Math.PI / 2;
+floorRing.position.y = 0.001;
+scene.add(floorRing);
+
+// ============================================================
+// Particle geometry
+// ============================================================
+const geom = new THREE.BufferGeometry();
+const posAttr = new THREE.BufferAttribute(pos, 3);
+const colAttr = new THREE.BufferAttribute(col, 3);
+posAttr.setUsage(THREE.DynamicDrawUsage);
+colAttr.setUsage(THREE.DynamicDrawUsage);
+geom.setAttribute('position', posAttr);
+geom.setAttribute('color', colAttr);
+
+const mat = new THREE.PointsMaterial({
+  size: 0.007,
+  sizeAttenuation: true,
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.9,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,  // glow effect
+});
+scene.add(new THREE.Points(geom, mat));
+
+// ============================================================
+// Collision capsule buffer  [ax ay az bx by bz r r²] × MAX_CAPS
+// ============================================================
+const MAX_CAPS = 16;
+const capBuf = new Float32Array(MAX_CAPS * 8);
+let numCaps = 0;
+
+let headX = 0, headY = 1.7, headZ = 0;
+const HEAD_R  = 0.14;
+const HEAD_R2 = HEAD_R * HEAD_R;
+let bodyActive = false;
+
+function setCap(j, ax, ay, az, bx, by, bz, r) {
+  const o = j * 8;
+  capBuf[o]=ax; capBuf[o+1]=ay; capBuf[o+2]=az;
+  capBuf[o+3]=bx; capBuf[o+4]=by; capBuf[o+5]=bz;
+  capBuf[o+6]=r;  capBuf[o+7]=r*r;
+}
+
+// Body segments to collide against [jointA, jointB, radius]
+// Radii are inflated slightly relative to the skin mesh for good particle coverage
+const COLL_SEGS = [
+  ['hips',             'spine-middle',      0.20],
+  ['spine-middle',     'chest',             0.18],
+  ['chest',            'neck',              0.09],
+  ['left-shoulder',    'left-arm-upper',    0.08],
+  ['left-arm-upper',   'left-arm-lower',    0.07],
+  ['left-arm-lower',   'left-hand-wrist',   0.055],
+  ['right-shoulder',   'right-arm-upper',   0.08],
+  ['right-arm-upper',  'right-arm-lower',   0.07],
+  ['right-arm-lower',  'right-hand-wrist',  0.055],
+  ['left-upper-leg',   'left-lower-leg',    0.09],
+  ['left-lower-leg',   'left-foot-ankle',   0.07],
+  ['right-upper-leg',  'right-lower-leg',   0.09],
+  ['right-lower-leg',  'right-foot-ankle',  0.07],
+];
+
+// ============================================================
+// Update capsule positions from body tracking
+// ============================================================
+const jp = {}; // joint position cache
+
+function updateBodyCollision(frame, refSpace) {
+  const body = frame.body;
+  if (!body) { bodyActive = false; return; }
+
+  for (const [name, space] of body) {
+    const pose = frame.getPose(space, refSpace);
+    if (pose) {
+      const p = pose.transform.position;
+      if (!jp[name]) jp[name] = { x:0, y:0, z:0 };
+      jp[name].x = p.x; jp[name].y = p.y; jp[name].z = p.z;
+    }
+  }
+
+  numCaps = 0;
+  for (const [a, b, r] of COLL_SEGS) {
+    if (jp[a] && jp[b]) {
+      setCap(numCaps++, jp[a].x, jp[a].y, jp[a].z, jp[b].x, jp[b].y, jp[b].z, r);
+    }
+  }
+
+  if (jp['head']) {
+    headX = jp['head'].x; headY = jp['head'].y + 0.04; headZ = jp['head'].z;
+  }
+  if (jp['hips']) {
+    spawnCX = jp['hips'].x;
+    spawnCZ = jp['hips'].z;
+    floorRing.position.x = spawnCX;
+    floorRing.position.z = spawnCZ;
+  }
+
+  bodyActive = numCaps > 0;
+}
+
+// ============================================================
+// Particle physics — tight loop over typed arrays
+// ============================================================
+function updateParticles(dt) {
+  const dtG   = GRAVITY * dt;
+  const decay = dt * 5.0;
+  const cx = spawnCX, cz = spawnCZ;
+  const nc = numCaps;
+  const active = bodyActive;
+
+  for (let i = 0; i < N; i++) {
+    const ix = i*3, iy = ix+1, iz = ix+2;
+
+    let px = pos[ix], py = pos[iy], pz = pos[iz];
+    let vx = vel[ix], vy = vel[iy], vz = vel[iz];
+
+    vy += dtG;
+    px += vx * dt;
+    py += vy * dt;
+    pz += vz * dt;
+
+    // Respawn when below floor
+    if (py < -0.05) {
+      const ri = (rdHead++ & (RBUF-1)) * 6;
+      pos[ix] = cx + RD[ri];
+      pos[iy] = SPAWN_Y + RD[ri+5];
+      pos[iz] = cz + RD[ri+1];
+      vel[ix] = RD[ri+2]; vel[iy] = RD[ri+3]; vel[iz] = RD[ri+4];
+      age[i] = 0;
+      continue;
+    }
+
+    // Collision — only check particles near the body
+    if (active) {
+      const ddx = px-cx, ddz = pz-cz;
+      if (ddx*ddx + ddz*ddz < CULL_R2 && py > 0 && py < 2.7) {
+        let hit = false;
+
+        // Capsule checks
+        for (let j = 0; j < nc && !hit; j++) {
+          const o = j * 8;
+          const ax=capBuf[o],   ay=capBuf[o+1], az=capBuf[o+2];
+          const bx=capBuf[o+3], by=capBuf[o+4], bz=capBuf[o+5];
+          const r=capBuf[o+6],  r2=capBuf[o+7];
+          const abx=bx-ax, aby=by-ay, abz=bz-az;
+          const ab2 = abx*abx + aby*aby + abz*abz;
+          let t = ab2 > 1e-8 ? ((px-ax)*abx+(py-ay)*aby+(pz-az)*abz)/ab2 : 0;
+          if (t < 0) t=0; else if (t > 1) t=1;
+          const qx=ax+t*abx, qy=ay+t*aby, qz=az+t*abz;
+          const ex=px-qx, ey=py-qy, ez=pz-qz;
+          const d2 = ex*ex + ey*ey + ez*ez;
+          if (d2 < r2 && d2 > 1e-10) {
+            const inv = 1/Math.sqrt(d2);
+            const nx=ex*inv, ny=ey*inv, nz=ez*inv;
+            px=qx+nx*r; py=qy+ny*r; pz=qz+nz*r;
+            const vn=vx*nx+vy*ny+vz*nz;
+            if (vn < 0) { const f=1+RESTITUTION; vx-=f*vn*nx; vy-=f*vn*ny; vz-=f*vn*nz; }
+            age[i] = 1;
+            hit = true;
+          }
+        }
+
+        // Head sphere
+        if (!hit) {
+          const hx=px-headX, hy=py-headY, hz=pz-headZ;
+          const hd2 = hx*hx + hy*hy + hz*hz;
+          if (hd2 < HEAD_R2 && hd2 > 1e-10) {
+            const inv = 1/Math.sqrt(hd2);
+            const nx=hx*inv, ny=hy*inv, nz=hz*inv;
+            px=headX+nx*HEAD_R; py=headY+ny*HEAD_R; pz=headZ+nz*HEAD_R;
+            const vn=vx*nx+vy*ny+vz*nz;
+            if (vn < 0) { const f=1+RESTITUTION; vx-=f*vn*nx; vy-=f*vn*ny; vz-=f*vn*nz; }
+            age[i] = 1;
+          }
+        }
+      }
+    }
+
+    pos[ix]=px; pos[iy]=py; pos[iz]=pz;
+    vel[ix]=vx; vel[iy]=vy; vel[iz]=vz;
+
+    // Color: speed-tinted blue-white + warm bounce flash
+    let ag = age[i];
+    if (ag > 0) { ag -= decay; if (ag < 0) ag = 0; age[i] = ag; }
+    const sp = Math.min(1, (vx*vx + vy*vy + vz*vz) * 0.03);
+    col[ix] = sp*0.3  + ag*0.9;         // R: dim → warm gold on bounce
+    col[iy] = sp*0.45 + ag*0.6  + 0.04; // G
+    col[iz] = sp*0.7  + ag*0.1  + 0.1;  // B: always slightly blue
+  }
+
+  posAttr.needsUpdate = true;
+  colAttr.needsUpdate = true;
+}
+
+// ============================================================
+// HUD
+// ============================================================
+const hudCvs = document.createElement('canvas');
+hudCvs.width = 512; hudCvs.height = 64;
+const hudCtx = hudCvs.getContext('2d');
+const hudTex = new THREE.CanvasTexture(hudCvs);
+const hudMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.55, 0.07),
+  new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, opacity: 0.7, depthWrite: false })
+);
+hudMesh.position.set(0, 2.4, -1.3);
+scene.add(hudMesh);
+
+let lastHudState = null;
+function drawHUD(active) {
+  if (active === lastHudState) return;
+  lastHudState = active;
+  hudCtx.clearRect(0, 0, 512, 64);
+  hudCtx.fillStyle = active ? '#44ff88' : '#ff6644';
+  hudCtx.font = 'bold 30px monospace';
+  hudCtx.textAlign = 'center';
+  hudCtx.fillText(active ? 'Body Tracking Active' : 'No Body Tracking', 256, 44);
+  hudTex.needsUpdate = true;
+}
+drawHUD(false);
+
+// ============================================================
+// WebXR
+// ============================================================
+const enterBtn = document.getElementById('enterVR');
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-vr').then(ok => {
+    enterBtn.disabled = !ok;
+    if (!ok) enterBtn.textContent = 'VR Not Supported';
+  });
+} else {
+  enterBtn.textContent = 'WebXR Not Available';
+}
+
+enterBtn.addEventListener('click', async () => {
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['body-tracking', 'local-floor', 'bounded-floor']
+    });
+    renderer.xr.setSession(session);
+    session.addEventListener('end', () => { enterBtn.textContent = 'Enter VR'; });
+    enterBtn.textContent = 'In VR';
+  } catch(e) { console.error(e); }
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ============================================================
+// Render loop
+// ============================================================
+let lastTs = 0;
+renderer.setAnimationLoop((ts, frame) => {
+  const dt = Math.min((ts - lastTs) / 1000, 0.05);
+  lastTs = ts;
+
+  if (frame && renderer.xr.isPresenting) {
+    const refSpace = renderer.xr.getReferenceSpace();
+    updateBodyCollision(frame, refSpace);
+    drawHUD(bodyActive);
+  }
+
+  updateParticles(dt);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
