@@ -118,14 +118,30 @@ colAttr.setUsage(THREE.DynamicDrawUsage);
 geom.setAttribute('position', posAttr);
 geom.setAttribute('color', colAttr);
 
-const mat = new THREE.PointsMaterial({
-  size: 0.007,
-  sizeAttenuation: true,
-  vertexColors: true,
+const mat = new THREE.ShaderMaterial({
+  uniforms: { pointSize: { value: 7.0 } },
+  vertexShader: `
+    attribute vec3 color;
+    varying vec3 vColor;
+    uniform float pointSize;
+    void main() {
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = pointSize / -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    void main() {
+      float r = length(gl_PointCoord - vec2(0.5));
+      if (r > 0.5) discard;
+      gl_FragColor = vec4(vColor, 1.0 - smoothstep(0.4, 0.5, r));
+    }
+  `,
   transparent: true,
-  opacity: 0.9,
+  blending: THREE.AdditiveBlending,
   depthWrite: false,
-  blending: THREE.AdditiveBlending,  // glow effect
 });
 scene.add(new THREE.Points(geom, mat));
 
