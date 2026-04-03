@@ -427,6 +427,13 @@ renderer.setAnimationLoop((ts, frame) => {
 
   if (frame && renderer.xr.isPresenting) {
     const refSpace = renderer.xr.getReferenceSpace();
+    // Always track head from viewer pose — body tracking overrides this when available
+    const viewerPose = frame.getViewerPose(refSpace);
+    if (viewerPose) {
+      const p = viewerPose.transform.position;
+      spawnX = p.x; spawnY = p.y + 0.15; spawnZ = p.z;
+      floorRing.position.x = p.x; floorRing.position.z = p.z;
+    }
     updateBodyCollision(frame, refSpace);
     drawHUD(bodyActive);
   }
