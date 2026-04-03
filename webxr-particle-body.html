@@ -241,15 +241,24 @@ function updateParticles(dt) {
     py += vy * dt;
     pz += vz * dt;
 
-    // Respawn when below floor
-    if (py < -0.05) {
-      const ri = (rdHead++ & (RBUF-1)) * 6;
-      pos[ix] = cx + RD[ri];
-      pos[iy] = SPAWN_Y + RD[ri+5];
-      pos[iz] = cz + RD[ri+1];
-      vel[ix] = RD[ri+2]; vel[iy] = RD[ri+3]; vel[iz] = RD[ri+4];
-      age[i] = 0;
-      continue;
+    // Floor bounce
+    if (py < 0) {
+      py = 0;
+      if (vy < 0) {
+        vy = -vy * RESTITUTION;
+        vx *= 0.85; vz *= 0.85; // friction
+        age[i] = 0.5;
+      }
+      // Respawn if nearly at rest on the floor
+      if (vy < 0.3) {
+        const ri = (rdHead++ & (RBUF-1)) * 6;
+        pos[ix] = cx + RD[ri];
+        pos[iy] = SPAWN_Y + RD[ri+5];
+        pos[iz] = cz + RD[ri+1];
+        vel[ix] = RD[ri+2]; vel[iy] = RD[ri+3]; vel[iz] = RD[ri+4];
+        age[i] = 0;
+        continue;
+      }
     }
 
     // Collision — only check particles near the body
