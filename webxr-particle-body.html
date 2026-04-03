@@ -36,8 +36,8 @@ import * as THREE from 'three';
 // Config — tune N down if frame-rate drops
 // ============================================================
 const N           = 200_000; // particle count
-const GRAVITY     = -9.8;    // m/s²
-const RESTITUTION = 0.55;    // bounciness
+const GRAVITY     = -4.0;    // m/s²
+const RESTITUTION = 0.82;    // bounciness
 const SPAWN_R     = 2.0;     // rain radius around body centre (m)
 const SPAWN_Y     = 4.5;     // rain spawn height (m above floor)
 const CULL_R2     = 1.6*1.6; // collision zone (XZ distance² from hips)
@@ -53,7 +53,7 @@ for (let i = 0; i < RBUF; i++) {
   RD[i*6+0] = Math.cos(a) * r;
   RD[i*6+1] = Math.sin(a) * r;
   RD[i*6+2] = (Math.random()-0.5) * 0.5;
-  RD[i*6+3] = -1.5 - Math.random() * 2.5;
+  RD[i*6+3] = -0.6 - Math.random() * 0.8;
   RD[i*6+4] = (Math.random()-0.5) * 0.5;
   RD[i*6+5] = Math.random() * 2.0;  // spawn height jitter
 }
@@ -76,7 +76,7 @@ for (let i = 0; i < N; i++) {
   pos[i*3+1] = Math.random() * SPAWN_Y;
   pos[i*3+2] = spawnCZ + Math.sin(a) * r;
   vel[i*3]   = (Math.random()-0.5) * 0.5;
-  vel[i*3+1] = -1.5 - Math.random() * 2.5;
+  vel[i*3+1] = -0.6 - Math.random() * 0.8;
   vel[i*3+2] = (Math.random()-0.5) * 0.5;
   col[i*3]   = 0.2; col[i*3+1] = 0.4; col[i*3+2] = 0.85;
 }
@@ -250,7 +250,7 @@ function updateParticles(dt) {
         age[i] = 0.5;
       }
       // Respawn if nearly at rest on the floor
-      if (vy < 0.3) {
+      if (vy < 0.15) {
         const ri = (rdHead++ & (RBUF-1)) * 6;
         pos[ix] = cx + RD[ri];
         pos[iy] = SPAWN_Y + RD[ri+5];
