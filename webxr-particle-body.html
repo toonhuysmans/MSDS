@@ -46,16 +46,14 @@ const CULL_R2     = 1.6*1.6; // collision zone (XZ distance² from hips)
 // Pre-computed respawn table — avoids Math.random/cos in the hot loop
 // ============================================================
 const RBUF = 8192;
-const RD = new Float32Array(RBUF * 6); // dx, dz, vx, vy, vz, dy_offset
+const RD = new Float32Array(RBUF * 3); // vx, vy, vz — random spherical kick
 for (let i = 0; i < RBUF; i++) {
-  const a = Math.random() * 6.28318;
-  const r = Math.sqrt(Math.random()) * SPAWN_R;
-  RD[i*6+0] = Math.cos(a) * r;
-  RD[i*6+1] = Math.sin(a) * r;
-  RD[i*6+2] = (Math.random()-0.5) * 0.5;
-  RD[i*6+3] = -0.6 - Math.random() * 0.8;
-  RD[i*6+4] = (Math.random()-0.5) * 0.5;
-  RD[i*6+5] = Math.random() * 2.0;  // spawn height jitter
+  const theta = Math.random() * 6.28318;
+  const phi   = Math.acos(2 * Math.random() - 1); // uniform sphere
+  const speed = 0.15 + Math.random() * 0.35;
+  RD[i*3+0] = Math.sin(phi) * Math.cos(theta) * speed;
+  RD[i*3+1] = Math.sin(phi) * Math.sin(theta) * speed;
+  RD[i*3+2] = Math.cos(phi) * speed;
 }
 let rdHead = 0;
 
@@ -67,18 +65,14 @@ const vel = new Float32Array(N * 3);
 const col = new Float32Array(N * 3);
 const age = new Float32Array(N); // bounce flash [0..1], decays to 0
 
-let spawnCX = 0, spawnCZ = -0.5;
+let spawnX = 0, spawnY = 2.2, spawnZ = -0.5; // updated each frame from head joint
 
-// Spread initial particles throughout the column so rain starts immediately
+// Start all particles at the spawn point with random kicks
 for (let i = 0; i < N; i++) {
-  const a = Math.random() * 6.28318, r = Math.sqrt(Math.random()) * SPAWN_R;
-  pos[i*3]   = spawnCX + Math.cos(a) * r;
-  pos[i*3+1] = Math.random() * SPAWN_Y;
-  pos[i*3+2] = spawnCZ + Math.sin(a) * r;
-  vel[i*3]   = (Math.random()-0.5) * 0.5;
-  vel[i*3+1] = -0.6 - Math.random() * 0.8;
-  vel[i*3+2] = (Math.random()-0.5) * 0.5;
-  col[i*3]   = 0.2; col[i*3+1] = 0.4; col[i*3+2] = 0.85;
+  const ri = (i & (RBUF-1)) * 3;
+  pos[i*3] = spawnX; pos[i*3+1] = spawnY; pos[i*3+2] = spawnZ;
+  vel[i*3] = RD[ri]; vel[i*3+1] = RD[ri+1]; vel[i*3+2] = RD[ri+2];
+  col[i*3] = 0.2; col[i*3+1] = 0.4; col[i*3+2] = 0.85;
 }
 
 // ============================================================
@@ -146,6 +140,46 @@ const mat = new THREE.ShaderMaterial({
 scene.add(new THREE.Points(geom, mat));
 
 // ============================================================
+// Armature — line skeleton drawn over the collision segments
+// ============================================================
+const armatureSegs = (COLL_SEGS.length + 1) * 2; // +1 for head-to-neck line
+const armPos = new Float32Array(armatureSegs * 3);
+const armGeom = new THREE.BufferGeometry();
+const armAttr = new THREE.BufferAttribute(armPos, 3);
+armAttr.setUsage(THREE.DynamicDrawUsage);
+armGeom.setAttribute('position', armAttr);
+const armMesh = new THREE.LineSegments(armGeom, new THREE.LineBasicMaterial({
+  color: 0x2255aa,
+  transparent: true,
+  opacity: 0.35,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+}));
+scene.add(armMesh);
+armMesh.visible = false;
+
+function updateArmature() {
+  let v = 0;
+  for (const [a, b] of COLL_SEGS) {
+    if (jp[a] && jp[b]) {
+      armPos[v++]=jp[a].x; armPos[v++]=jp[a].y; armPos[v++]=jp[a].z;
+      armPos[v++]=jp[b].x; armPos[v++]=jp[b].y; armPos[v++]=jp[b].z;
+    } else {
+      // degenerate segment — collapse to origin so it's invisible
+      for (let k = 0; k < 6; k++) armPos[v++] = 0;
+    }
+  }
+  // Head sphere centre to neck
+  if (jp['head'] && jp['neck']) {
+    armPos[v++]=headX; armPos[v++]=headY; armPos[v++]=headZ;
+    armPos[v++]=jp['neck'].x; armPos[v++]=jp['neck'].y; armPos[v++]=jp['neck'].z;
+  } else { for (let k = 0; k < 6; k++) armPos[v++] = 0; }
+  armAttr.needsUpdate = true;
+  armGeom.setDrawRange(0, v / 3);
+  armMesh.visible = bodyActive;
+}
+
+// ============================================================
 // Collision capsule buffer  [ax ay az bx by bz r r²] × MAX_CAPS
 // ============================================================
 const MAX_CAPS = 16;
@@ -210,14 +244,16 @@ function updateBodyCollision(frame, refSpace) {
   if (jp['head']) {
     headX = jp['head'].x; headY = jp['head'].y + 0.04; headZ = jp['head'].z;
   }
-  if (jp['hips']) {
-    spawnCX = jp['hips'].x;
-    spawnCZ = jp['hips'].z;
-    floorRing.position.x = spawnCX;
-    floorRing.position.z = spawnCZ;
+  if (jp['head']) {
+    spawnX = jp['head'].x;
+    spawnY = jp['head'].y + 0.35; // just above the head
+    spawnZ = jp['head'].z;
+    floorRing.position.x = spawnX;
+    floorRing.position.z = spawnZ;
   }
 
   bodyActive = numCaps > 0;
+  updateArmature();
 }
 
 // ============================================================
@@ -226,7 +262,7 @@ function updateBodyCollision(frame, refSpace) {
 function updateParticles(dt) {
   const dtG   = GRAVITY * dt;
   const decay = dt * 5.0;
-  const cx = spawnCX, cz = spawnCZ;
+  const cx = spawnX, cy = spawnY, cz = spawnZ;
   const nc = numCaps;
   const active = bodyActive;
 
@@ -251,11 +287,9 @@ function updateParticles(dt) {
       }
       // Respawn if nearly at rest on the floor
       if (vy < 0.15) {
-        const ri = (rdHead++ & (RBUF-1)) * 6;
-        pos[ix] = cx + RD[ri];
-        pos[iy] = SPAWN_Y + RD[ri+5];
-        pos[iz] = cz + RD[ri+1];
-        vel[ix] = RD[ri+2]; vel[iy] = RD[ri+3]; vel[iz] = RD[ri+4];
+        const ri = (rdHead++ & (RBUF-1)) * 3;
+        pos[ix] = cx; pos[iy] = cy; pos[iz] = cz;
+        vel[ix] = RD[ri]; vel[iy] = RD[ri+1]; vel[iz] = RD[ri+2];
         age[i] = 0;
         continue;
       }
