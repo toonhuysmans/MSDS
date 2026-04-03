@@ -137,7 +137,9 @@ const mat = new THREE.ShaderMaterial({
   blending: THREE.AdditiveBlending,
   depthWrite: false,
 });
-scene.add(new THREE.Points(geom, mat));
+const points = new THREE.Points(geom, mat);
+points.frustumCulled = false;
+scene.add(points);
 
 // ============================================================
 // Body segments to collide against [jointA, jointB, radius]
