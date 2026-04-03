@@ -63,16 +63,17 @@ let rdHead = 0;
 const pos = new Float32Array(N * 3);
 const vel = new Float32Array(N * 3);
 const col = new Float32Array(N * 3);
-const age = new Float32Array(N); // bounce flash [0..1], decays to 0
+const age      = new Float32Array(N); // bounce flash [0..1], decays to 0
+const restTimer = new Float32Array(N); // seconds until next launch; >0 = parked invisible
 
 let spawnX = 0, spawnY = 2.2, spawnZ = -0.5; // updated each frame from head joint
 
-// Start all particles at the spawn point with random kicks
+// Stagger initial launches so they trickle out rather than burst all at once
 for (let i = 0; i < N; i++) {
-  const ri = (i & (RBUF-1)) * 3;
   pos[i*3] = spawnX; pos[i*3+1] = spawnY; pos[i*3+2] = spawnZ;
-  vel[i*3] = RD[ri]; vel[i*3+1] = RD[ri+1]; vel[i*3+2] = RD[ri+2];
-  col[i*3] = 0.2; col[i*3+1] = 0.4; col[i*3+2] = 0.85;
+  vel[i*3] = 0; vel[i*3+1] = 0; vel[i*3+2] = 0;
+  col[i*3] = 0; col[i*3+1] = 0; col[i*3+2] = 0;          // invisible until launched
+  restTimer[i] = Math.random() * 12.0;                      // staggered 0-12s delay
 }
 
 // ============================================================
@@ -83,7 +84,8 @@ scene.background = new THREE.Color(0x020208);
 scene.fog = new THREE.FogExp2(0x020208, 0.12);
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 30);
-camera.position.set(0, 1.6, 0);
+camera.position.set(0, 1.5, 2.5);  // behind the body looking forward
+camera.lookAt(0, 1.0, 0);
 
 const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -113,7 +115,7 @@ geom.setAttribute('position', posAttr);
 geom.setAttribute('color', colAttr);
 
 const mat = new THREE.ShaderMaterial({
-  uniforms: { pointSize: { value: 7.0 } },
+  uniforms: { pointSize: { value: 7.0 }, time: { value: 0.0 } },
   vertexShader: `
     attribute vec3 color;
     varying vec3 vColor;
@@ -126,11 +128,26 @@ const mat = new THREE.ShaderMaterial({
     }
   `,
   fragmentShader: `
+    uniform float time;
     varying vec3 vColor;
     void main() {
       float r = length(gl_PointCoord - vec2(0.5));
       if (r > 0.5) discard;
-      gl_FragColor = vec4(vColor, 1.0 - smoothstep(0.4, 0.5, r));
+
+      // Soft inner glow disc
+      float glow = pow(1.0 - smoothstep(0.0, 0.5, r), 1.6);
+
+      // Slow eerie breathing pulse, slightly different per particle (use blue channel as seed)
+      float pulse = 0.55 + 0.45 * sin(time * 0.65 + vColor.b * 11.0);
+
+      // Spectral shift — drain red, boost sickly green-cyan
+      vec3 eerie = vec3(
+        vColor.r * 0.35,
+        vColor.g * 0.85 + vColor.b * 0.25,
+        vColor.b * 1.3 + 0.05
+      );
+
+      gl_FragColor = vec4(eerie * glow * pulse, glow);
     }
   `,
   transparent: true,
@@ -272,6 +289,18 @@ function updateParticles(dt) {
   for (let i = 0; i < N; i++) {
     const ix = i*3, iy = ix+1, iz = ix+2;
 
+    // Rest timer — particle parked until countdown expires, then launched
+    if (restTimer[i] > 0) {
+      restTimer[i] -= dt;
+      if (restTimer[i] > 0) continue;
+      // Launch from spawn point
+      const ri = (rdHead++ & (RBUF-1)) * 3;
+      pos[ix] = cx; pos[iy] = cy; pos[iz] = cz;
+      vel[ix] = RD[ri]; vel[iy] = RD[ri+1]; vel[iz] = RD[ri+2];
+      age[i] = 0;
+      continue;
+    }
+
     let px = pos[ix], py = pos[iy], pz = pos[iz];
     let vx = vel[ix], vy = vel[iy], vz = vel[iz];
 
@@ -288,12 +317,14 @@ function updateParticles(dt) {
         vx *= 0.85; vz *= 0.85; // friction
         age[i] = 0.5;
       }
-      // Respawn if nearly at rest on the floor
+      // Nearly at rest — park invisible and start rest timer
       if (vy < 0.15) {
-        const ri = (rdHead++ & (RBUF-1)) * 3;
-        pos[ix] = cx; pos[iy] = cy; pos[iz] = cz;
-        vel[ix] = RD[ri]; vel[iy] = RD[ri+1]; vel[iz] = RD[ri+2];
-        age[i] = 0;
+        if (restTimer[i] <= 0) restTimer[i] = 1.5 + Math.random() * 4.5;
+        px = 0; py = 0; pz = 0;
+        vx = 0; vy = 0; vz = 0;
+        col[ix] = 0; col[iy] = 0; col[iz] = 0; // invisible (additive black)
+        pos[ix]=px; pos[iy]=py; pos[iz]=pz;
+        vel[ix]=0; vel[iy]=0; vel[iz]=0;
         continue;
       }
     }
@@ -438,6 +469,7 @@ renderer.setAnimationLoop((ts, frame) => {
     drawHUD(bodyActive);
   }
 
+  mat.uniforms.time.value = ts / 1000;
   updateParticles(dt);
   renderer.render(scene, camera);
 });
