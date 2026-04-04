@@ -39,7 +39,7 @@ import { VRMLoaderPlugin, VRMHumanBoneName } from '@pixiv/three-vrm';
 // ============================================================
 // Config — tune N down if frame-rate drops
 // ============================================================
-const N           = 200_000; // particle count
+const N           = 60_000;  // particle count (200k is too heavy for Quest CPU; tune up if smooth)
 const GRAVITY     = -1.2;    // m/s² — gentle ash drift
 const AIR_DRAG    =  1.8;    // s⁻¹ — linear drag; terminal velocity ≈ GRAVITY/AIR_DRAG ≈ 0.67 m/s
 const RESTITUTION = 0.04;    // nearly no bounce — ash deadens on impact
@@ -708,7 +708,9 @@ window.addEventListener('resize', () => {
 // Render loop
 // ============================================================
 let lastTs = 0;
+let depthMapFrame = 0;
 renderer.setAnimationLoop((ts, frame) => {
+  try {
   const dt = Math.min((ts - lastTs) / 1000, 0.05);
   lastTs = ts;
 
@@ -722,7 +724,8 @@ renderer.setAnimationLoop((ts, frame) => {
       floorRing.position.x = p.x; floorRing.position.z = 2 * MIRROR_PLANE_Z - p.z;
     }
     updateBodyCollision(frame, refSpace, dt);
-    renderDepthMap();
+    // Depth map at ~30fps (every 3 XR frames) to save GPU budget
+    if (++depthMapFrame % 3 === 0) renderDepthMap();
 
     // Right thumbstick — redo calibration
     if (xrSession) {
@@ -740,6 +743,7 @@ renderer.setAnimationLoop((ts, frame) => {
   mat.uniforms.time.value = ts / 1000;
   updateParticles(dt);
   renderer.render(scene, camera);
+  } catch(e) { console.error('loop error', e); }
 });
 </script>
 </body>
