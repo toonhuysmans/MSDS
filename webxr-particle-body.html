@@ -45,6 +45,7 @@ const SPAWN_R     = 2.0;     // rain radius around body centre (m)
 const SPAWN_Y     = 4.5;     // rain spawn height (m above floor)
 const CULL_R2         = 1.6*1.6; // collision zone (XZ distance² from mirror hips)
 const MIRROR_PLANE_Z  = -1.5;    // world-Z of the mirror surface (halfway between user and image)
+const K_BLEND         =  0.10;   // smooth-min blend radius (m) — merges capsule boundaries into one surface
 
 // ============================================================
 // Pre-computed respawn table — avoids Math.random/cos in the hot loop
@@ -413,60 +414,67 @@ function updateParticles(dt) {
       }
     }
 
-    // Collision — only check particles near the mirror body
+    // Smooth SDF body collision — all capsules blended into one organic surface
     if (active) {
       const ddx = px-chx, ddz = pz-chz;
       if (ddx*ddx + ddz*ddz < CULL_R2 && py > 0 && py < 2.7) {
-        let hit = false;
+        // Accumulate smooth-min SDF + blended gradient + blended joint velocity
+        // Using Inigo Quilez polynomial smooth-min: smin(a,b,k)
+        //   h = clamp(0.5 + 0.5*(b-a)/k, 0, 1)
+        //   result = mix(b, a, h) - k*h*(1-h)
+        //   gradient weight for a = h, for b = 1-h
+        let sd = 1e9;
+        let gnx=0, gny=0, gnz=0;
+        let jvbx=0, jvby=0, jvbz=0;
 
-        // Capsule checks
-        for (let j = 0; j < nc && !hit; j++) {
+        for (let j = 0; j < nc; j++) {
           const o = j * CAP_STRIDE;
           const ax=capBuf[o],   ay=capBuf[o+1], az=capBuf[o+2];
           const bx=capBuf[o+3], by=capBuf[o+4], bz=capBuf[o+5];
-          const r=capBuf[o+6],  r2=capBuf[o+7];
+          const r=capBuf[o+6];
           const jvx=capBuf[o+8], jvy=capBuf[o+9], jvz=capBuf[o+10];
           const abx=bx-ax, aby=by-ay, abz=bz-az;
-          const ab2 = abx*abx + aby*aby + abz*abz;
-          let t = ab2 > 1e-8 ? ((px-ax)*abx+(py-ay)*aby+(pz-az)*abz)/ab2 : 0;
-          if (t < 0) t=0; else if (t > 1) t=1;
+          const ab2=abx*abx+aby*aby+abz*abz;
+          let t=ab2>1e-8?((px-ax)*abx+(py-ay)*aby+(pz-az)*abz)/ab2:0;
+          if(t<0)t=0; else if(t>1)t=1;
           const qx=ax+t*abx, qy=ay+t*aby, qz=az+t*abz;
           const ex=px-qx, ey=py-qy, ez=pz-qz;
-          const d2 = ex*ex + ey*ey + ez*ez;
-          if (d2 < r2 && d2 > 1e-10) {
-            const inv = 1/Math.sqrt(d2);
-            const nx=ex*inv, ny=ey*inv, nz=ez*inv;
-            px=qx+nx*r; py=qy+ny*r; pz=qz+nz*r;
-            // Moving-surface model: work in joint's reference frame
-            // Slow joint → ash sticks; fast joint → ash flung outward
-            const rvx=vx-jvx, rvy=vy-jvy, rvz=vz-jvz;
-            const vn_rel = rvx*nx + rvy*ny + rvz*nz;
-            if (vn_rel < 0) {
-              vx = jvx + (rvx - vn_rel*nx) * BODY_STICK;
-              vy = jvy + (rvy - vn_rel*ny) * BODY_STICK;
-              vz = jvz + (rvz - vn_rel*nz) * BODY_STICK;
-            }
-            age[i] = 1;
-            hit = true;
-          }
+          const dist=Math.sqrt(ex*ex+ey*ey+ez*ez);
+          const capsdf=dist-r;
+          const dinv=dist>1e-8?1/dist:0;
+          const cnx=ex*dinv, cny=ey*dinv, cnz=ez*dinv;
+          // Smooth-min: sd is 'a', capsdf is 'b'
+          const bh=Math.min(1,Math.max(0, 0.5+0.5*(capsdf-sd)/K_BLEND));
+          const sm=K_BLEND*bh*(1-bh);
+          gnx=gnx*bh+cnx*(1-bh); gny=gny*bh+cny*(1-bh); gnz=gnz*bh+cnz*(1-bh);
+          jvbx=jvbx*bh+jvx*(1-bh); jvby=jvby*bh+jvy*(1-bh); jvbz=jvbz*bh+jvz*(1-bh);
+          sd=bh*sd+(1-bh)*capsdf-sm;
         }
 
-        // Head sphere
-        if (!hit) {
-          const hx=px-headX, hy=py-headY, hz=pz-headZ;
-          const hd2 = hx*hx + hy*hy + hz*hz;
-          if (hd2 < HEAD_R2 && hd2 > 1e-10) {
-            const inv = 1/Math.sqrt(hd2);
-            const nx=hx*inv, ny=hy*inv, nz=hz*inv;
-            px=headX+nx*HEAD_R; py=headY+ny*HEAD_R; pz=headZ+nz*HEAD_R;
-            const rvx=vx-headVX, rvy=vy-headVY, rvz=vz-headVZ;
-            const vn_rel = rvx*nx + rvy*ny + rvz*nz;
-            if (vn_rel < 0) {
-              vx = headVX + (rvx - vn_rel*nx) * BODY_STICK;
-              vy = headVY + (rvy - vn_rel*ny) * BODY_STICK;
-              vz = headVZ + (rvz - vn_rel*nz) * BODY_STICK;
+        // Head sphere blended in
+        { const hx=px-headX,hy=py-headY,hz=pz-headZ;
+          const hd=Math.sqrt(hx*hx+hy*hy+hz*hz);
+          const headsdf=hd-HEAD_R; const hinv=hd>1e-8?1/hd:0;
+          const bh=Math.min(1,Math.max(0, 0.5+0.5*(headsdf-sd)/K_BLEND));
+          const sm=K_BLEND*bh*(1-bh);
+          gnx=gnx*bh+hx*hinv*(1-bh); gny=gny*bh+hy*hinv*(1-bh); gnz=gnz*bh+hz*hinv*(1-bh);
+          jvbx=jvbx*bh+headVX*(1-bh); jvby=jvby*bh+headVY*(1-bh); jvbz=jvbz*bh+headVZ*(1-bh);
+          sd=bh*sd+(1-bh)*headsdf-sm; }
+
+        if (sd < 0) {
+          const gl=Math.sqrt(gnx*gnx+gny*gny+gnz*gnz);
+          if (gl>1e-6) {
+            const inv=1/gl;
+            const nx=gnx*inv, ny=gny*inv, nz=gnz*inv;
+            px-=nx*sd; py-=ny*sd; pz-=nz*sd; // sd<0, pushes outward
+            const rvx=vx-jvbx, rvy=vy-jvby, rvz=vz-jvbz;
+            const vn_rel=rvx*nx+rvy*ny+rvz*nz;
+            if(vn_rel<0){
+              vx=jvbx+(rvx-vn_rel*nx)*BODY_STICK;
+              vy=jvby+(rvy-vn_rel*ny)*BODY_STICK;
+              vz=jvbz+(rvz-vn_rel*nz)*BODY_STICK;
             }
-            age[i] = 1;
+            age[i]=1;
           }
         }
       }
