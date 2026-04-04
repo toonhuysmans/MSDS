@@ -223,6 +223,10 @@ vrmLoader.load(VRM_URL, (gltf) => {
   vrmNaturalHipsY = _tv.y;
   vrm.scene.visible = false;
   scene.add(vrm.scene);
+  // Depth cam sees only VRM (layer 1), not particles / HUD / floor
+  vrm.scene.traverse(o => o.layers.enable(1));
+  depthCam.layers.set(1);
+  mat.uniforms.heightMap.value = depthRT.texture;
 }, undefined, (e) => console.error('VRM load error:', e));
 
 // ============================================================
@@ -238,10 +242,19 @@ geom.setAttribute('position', posAttr);
 geom.setAttribute('color', colAttr);
 geom.setAttribute('aSize', sizeAttr);
 
+// Height-map constants
+const DMAP_SIZE = 128;
+const DMAP_HALF = 1.0;   // half-extent in world metres → 2 m × 2 m coverage
+const DMAP_YMAX = 2.5;   // maximum Y height encoded
+
 const mat = new THREE.ShaderMaterial({
   uniforms: {
     pointSize: { value: 20.0 },  // larger so particles are visible at VR distance (~3 m)
     time:      { value: 0.0 },
+    heightMap: { value: null },  // top-down depth render of VRM; set after depthRT created
+    hmCenter:  { value: new THREE.Vector2(0, 2 * MIRROR_PLANE_Z) },
+    hmHalf:    { value: DMAP_HALF },
+    hmYMax:    { value: DMAP_YMAX },
   },
   vertexShader: `
     attribute vec3  color;
@@ -249,10 +262,26 @@ const mat = new THREE.ShaderMaterial({
     varying vec3  vColor;
     varying float vSize;
     uniform float pointSize;
+    uniform sampler2D heightMap;
+    uniform vec2  hmCenter;
+    uniform float hmHalf;
+    uniform float hmYMax;
     void main() {
       vColor = color;
       vSize  = aSize;
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vec3 pos = position;
+      // Snap particle Y up to VRM surface if it is at or just below it
+      vec2 uv;
+      uv.x = (pos.x - hmCenter.x + hmHalf) / (2.0 * hmHalf);
+      uv.y = (hmCenter.y + hmHalf - pos.z) / (2.0 * hmHalf);
+      if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
+        float surfY = texture2D(heightMap, uv).r * hmYMax;
+        // Only snap if particle is within 8 cm below the top surface — avoids
+        // pulling mid-air or side-surface particles up to the wrong height.
+        float diff = surfY - pos.y;
+        if (diff > 0.0 && diff < 0.08) pos.y = surfY;
+      }
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
       gl_PointSize = pointSize * aSize / -mv.z;
       gl_Position = projectionMatrix * mv;
     }
@@ -292,6 +321,75 @@ const mat = new THREE.ShaderMaterial({
 const points = new THREE.Points(geom, mat);
 points.frustumCulled = false;
 scene.add(points);
+
+// ============================================================
+// GPU height-map — top-down orthographic render of VRM into a 128×128 texture.
+// Particle vertex shader snaps particles to surface without any CPU readback.
+// The depth pass runs AFTER the main XR render each frame so it never
+// interferes with the active XR frame; the texture is one frame stale, which
+// is imperceptible.
+// ============================================================
+const depthCam = new THREE.OrthographicCamera(
+  -DMAP_HALF, DMAP_HALF,
+   DMAP_HALF, -DMAP_HALF,
+  0.01, 3.5
+);
+depthCam.rotation.set(-Math.PI / 2, 0, 0); // look straight down
+
+const depthRT = new THREE.WebGLRenderTarget(DMAP_SIZE, DMAP_SIZE, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat, type: THREE.UnsignedByteType,
+});
+
+// Encodes world-Y into the red channel; includes skinning so animated poses work
+const heightEncMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    #include <common>
+    #include <skinning_pars_vertex>
+    varying float vWorldY;
+    void main() {
+      vec3 transformed = vec3(position);
+      #include <skinbase_vertex>
+      #include <skinning_vertex>
+      vec4 wp = modelMatrix * vec4(transformed, 1.0);
+      vWorldY = wp.y;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    varying float vWorldY;
+    uniform float yMax;
+    void main() {
+      float t = clamp(vWorldY / yMax, 0.0, 1.0);
+      gl_FragColor = vec4(t, 0.0, 0.0, 1.0);
+    }
+  `,
+  uniforms: { yMax: { value: DMAP_YMAX } },
+  defines: { USE_SKINNING: '' },
+  side: THREE.FrontSide,
+});
+
+function renderDepthMap() {
+  if (!vrm || !vrm.scene.visible) return;
+  depthCam.position.set(mirrorHipsX, 2.5, mirrorHipsZ);
+  depthCam.updateMatrixWorld();
+  // Disable XR so Three.js uses depthCam directly instead of substituting
+  // the headset ArrayCamera.  This call is safe here because it happens
+  // AFTER renderer.render() has already submitted the current XR frame.
+  const wasXR = renderer.xr.enabled;
+  renderer.xr.enabled = false;
+  try {
+    scene.overrideMaterial = heightEncMat;
+    renderer.setRenderTarget(depthRT);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+    renderer.render(scene, depthCam);
+  } finally {
+    scene.overrideMaterial = null;
+    renderer.setRenderTarget(null);
+    renderer.xr.enabled = wasXR;
+  }
+}
 
 // CPU body spheres — physics collision gives velocity response when particles hit body
 const BODY_SPHERES = [
@@ -417,8 +515,9 @@ function updateBodyCollision(frame, refSpace, dt) {
     mj[jointName].x = px;      mj[jointName].y = py;      mj[jointName].z = pz;
   }
 
-  // Track mirror hips (particle cull zone centre)
+  // Track mirror hips (depth cam centre + particle cull zone)
   if (mj['hips']) { mirrorHipsX = mj['hips'].x; mirrorHipsZ = mj['hips'].z; }
+  mat.uniforms.hmCenter.value.set(mirrorHipsX, mirrorHipsZ);
 
   // Spawn point above VRM head
   if (mj['head']) {
@@ -635,6 +734,9 @@ renderer.setAnimationLoop((ts, frame) => {
   mat.uniforms.time.value = ts / 1000;
   updateParticles(dt);
   renderer.render(scene, camera);
+  // Depth pass runs AFTER the XR frame is submitted — safe to toggle xr.enabled
+  // here; the resulting texture is ready for the next frame's particle shader.
+  if (renderer.xr.isPresenting) renderDepthMap();
   } catch(e) { console.error('loop error', e); }
 });
 </script>
