@@ -26,7 +26,7 @@
 </script>
 </head>
 <body>
-<div id="info">Particle Body — Quest 3 · chrome://flags → WebXR Experiments</div>
+<div id="info">Particle Body Mirror — Quest 3 · chrome://flags → WebXR Experiments<br><small>A mirror of your body appears 2 m ahead — particles rain down and bounce off its shape</small></div>
 <button id="enterVR" disabled>Enter VR</button>
 
 <script type="module">
@@ -40,7 +40,8 @@ const GRAVITY     = -4.0;    // m/s²
 const RESTITUTION = 0.82;    // bounciness
 const SPAWN_R     = 2.0;     // rain radius around body centre (m)
 const SPAWN_Y     = 4.5;     // rain spawn height (m above floor)
-const CULL_R2     = 1.6*1.6; // collision zone (XZ distance² from hips)
+const CULL_R2     = 1.6*1.6; // collision zone (XZ distance² from mirror hips)
+const MIRROR_Z    = -2.0;    // mirror body offset: this many metres in front of real hips
 
 // ============================================================
 // Pre-computed respawn table — avoids Math.random/cos in the hot loop
@@ -66,7 +67,7 @@ const col = new Float32Array(N * 3);
 const age      = new Float32Array(N); // bounce flash [0..1], decays to 0
 const restTimer = new Float32Array(N); // seconds until next launch; >0 = parked invisible
 
-let spawnX = 0, spawnY = 2.2, spawnZ = -0.5; // updated each frame from head joint
+let spawnX = 0, spawnY = 2.2, spawnZ = MIRROR_Z; // updated each frame from mirrored head joint
 
 // Stagger initial launches so they trickle out rather than burst all at once
 for (let i = 0; i < N; i++) {
@@ -84,8 +85,8 @@ scene.background = new THREE.Color(0x020208);
 scene.fog = new THREE.FogExp2(0x020208, 0.12);
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 30);
-camera.position.set(0, 1.5, 2.5);  // behind the body looking forward
-camera.lookAt(0, 1.0, 0);
+camera.position.set(0, 1.5, 0.5);   // user viewpoint — looking at mirror body ahead
+camera.lookAt(0, 1.2, MIRROR_Z);
 
 const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -100,7 +101,7 @@ const floorRing = new THREE.Mesh(
   new THREE.MeshBasicMaterial({ color: 0x0a0a22, transparent: true, opacity: 0.6, side: THREE.DoubleSide })
 );
 floorRing.rotation.x = -Math.PI / 2;
-floorRing.position.y = 0.001;
+floorRing.position.set(0, 0.001, MIRROR_Z);
 scene.add(floorRing);
 
 // ============================================================
@@ -199,18 +200,17 @@ armMesh.visible = false;
 function updateArmature() {
   let v = 0;
   for (const [a, b] of COLL_SEGS) {
-    if (jp[a] && jp[b]) {
-      armPos[v++]=jp[a].x; armPos[v++]=jp[a].y; armPos[v++]=jp[a].z;
-      armPos[v++]=jp[b].x; armPos[v++]=jp[b].y; armPos[v++]=jp[b].z;
+    if (mj[a] && mj[b]) {
+      armPos[v++]=mj[a].x; armPos[v++]=mj[a].y; armPos[v++]=mj[a].z;
+      armPos[v++]=mj[b].x; armPos[v++]=mj[b].y; armPos[v++]=mj[b].z;
     } else {
-      // degenerate segment — collapse to origin so it's invisible
       for (let k = 0; k < 6; k++) armPos[v++] = 0;
     }
   }
   // Head sphere centre to neck
-  if (jp['head'] && jp['neck']) {
+  if (mj['head'] && mj['neck']) {
     armPos[v++]=headX; armPos[v++]=headY; armPos[v++]=headZ;
-    armPos[v++]=jp['neck'].x; armPos[v++]=jp['neck'].y; armPos[v++]=jp['neck'].z;
+    armPos[v++]=mj['neck'].x; armPos[v++]=mj['neck'].y; armPos[v++]=mj['neck'].z;
   } else { for (let k = 0; k < 6; k++) armPos[v++] = 0; }
   armAttr.needsUpdate = true;
   armGeom.setDrawRange(0, v / 3);
@@ -224,7 +224,8 @@ const MAX_CAPS = 16;
 const capBuf = new Float32Array(MAX_CAPS * 8);
 let numCaps = 0;
 
-let headX = 0, headY = 1.7, headZ = 0;
+let headX = 0, headY = 1.7, headZ = MIRROR_Z;
+let mirrorHipsX = 0, mirrorHipsZ = MIRROR_Z; // for particle AABB culling
 const HEAD_R  = 0.14;
 const HEAD_R2 = HEAD_R * HEAD_R;
 let bodyActive = false;
@@ -239,7 +240,16 @@ function setCap(j, ax, ay, az, bx, by, bz, r) {
 // ============================================================
 // Update capsule positions from body tracking
 // ============================================================
-const jp = {}; // joint position cache
+const jp = {}; // real joint position cache
+const mj = {}; // mirrored joint position cache
+
+function mirrorJoint(name, hipsX) {
+  if (!jp[name]) return;
+  if (!mj[name]) mj[name] = { x:0, y:0, z:0 };
+  mj[name].x = 2 * hipsX - jp[name].x; // left-right flip around hips centre
+  mj[name].y = jp[name].y;
+  mj[name].z = jp[name].z + MIRROR_Z;   // offset in front of user
+}
 
 function updateBodyCollision(frame, refSpace) {
   const body = frame.body;
@@ -254,20 +264,27 @@ function updateBodyCollision(frame, refSpace) {
     }
   }
 
+  // Compute mirrored skeleton
+  const hipsX = jp['hips'] ? jp['hips'].x : 0;
+  for (const name of Object.keys(jp)) mirrorJoint(name, hipsX);
+
+  // Track mirror hips for culling
+  if (mj['hips']) { mirrorHipsX = mj['hips'].x; mirrorHipsZ = mj['hips'].z; }
+
+  // Build capsules from mirrored positions
   numCaps = 0;
   for (const [a, b, r] of COLL_SEGS) {
-    if (jp[a] && jp[b]) {
-      setCap(numCaps++, jp[a].x, jp[a].y, jp[a].z, jp[b].x, jp[b].y, jp[b].z, r);
+    if (mj[a] && mj[b]) {
+      setCap(numCaps++, mj[a].x, mj[a].y, mj[a].z, mj[b].x, mj[b].y, mj[b].z, r);
     }
   }
 
-  if (jp['head']) {
-    headX = jp['head'].x; headY = jp['head'].y + 0.04; headZ = jp['head'].z;
-  }
-  if (jp['head']) {
-    spawnX = jp['head'].x;
-    spawnY = jp['head'].y + 0.35; // just above the head
-    spawnZ = jp['head'].z;
+  // Mirror head
+  if (mj['head']) {
+    headX = mj['head'].x; headY = mj['head'].y + 0.04; headZ = mj['head'].z;
+    spawnX = mj['head'].x;
+    spawnY = mj['head'].y + 0.35; // just above mirrored head
+    spawnZ = mj['head'].z;
     floorRing.position.x = spawnX;
     floorRing.position.z = spawnZ;
   }
@@ -283,6 +300,7 @@ function updateParticles(dt) {
   const dtG   = GRAVITY * dt;
   const decay = dt * 5.0;
   const cx = spawnX, cy = spawnY, cz = spawnZ;
+  const chx = mirrorHipsX, chz = mirrorHipsZ; // cull centre at mirror hips
   const nc = numCaps;
   const active = bodyActive;
 
@@ -329,9 +347,9 @@ function updateParticles(dt) {
       }
     }
 
-    // Collision — only check particles near the body
+    // Collision — only check particles near the mirror body
     if (active) {
-      const ddx = px-cx, ddz = pz-cz;
+      const ddx = px-chx, ddz = pz-chz;
       if (ddx*ddx + ddz*ddz < CULL_R2 && py > 0 && py < 2.7) {
         let hit = false;
 
@@ -413,7 +431,7 @@ function drawHUD(active) {
   hudCtx.fillStyle = active ? '#44ff88' : '#ff6644';
   hudCtx.font = 'bold 30px monospace';
   hudCtx.textAlign = 'center';
-  hudCtx.fillText(active ? 'Body Tracking Active' : 'No Body Tracking', 256, 44);
+  hudCtx.fillText(active ? 'Mirror Body Active — look ahead' : 'No Body Tracking', 256, 44);
   hudTex.needsUpdate = true;
 }
 drawHUD(false);
@@ -458,12 +476,12 @@ renderer.setAnimationLoop((ts, frame) => {
 
   if (frame && renderer.xr.isPresenting) {
     const refSpace = renderer.xr.getReferenceSpace();
-    // Always track head from viewer pose — body tracking overrides this when available
+    // Fallback before body tracking: spawn above the mirror position offset from viewer head
     const viewerPose = frame.getViewerPose(refSpace);
     if (viewerPose) {
       const p = viewerPose.transform.position;
-      spawnX = p.x; spawnY = p.y + 0.15; spawnZ = p.z;
-      floorRing.position.x = p.x; floorRing.position.z = p.z;
+      spawnX = p.x; spawnY = p.y + 0.15; spawnZ = p.z + MIRROR_Z;
+      floorRing.position.x = p.x; floorRing.position.z = p.z + MIRROR_Z;
     }
     updateBodyCollision(frame, refSpace);
     drawHUD(bodyActive);
