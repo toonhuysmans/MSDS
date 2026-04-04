@@ -243,6 +243,11 @@ geom.setAttribute('position', posAttr);
 geom.setAttribute('color', colAttr);
 geom.setAttribute('aSize', sizeAttr);
 
+// Height-map constants (referenced by particle shader uniforms below)
+const DMAP_SIZE = 128;
+const DMAP_HALF = 1.0;
+const DMAP_YMAX = 2.5;
+
 const mat = new THREE.ShaderMaterial({
   uniforms: {
     pointSize: { value: 6.0 },
@@ -318,9 +323,6 @@ scene.add(points);
 // ============================================================
 // GPU height-map collision
 // ============================================================
-const DMAP_SIZE = 128;     // render target resolution
-const DMAP_HALF = 1.0;     // half-extent in world metres (2 m × 2 m coverage)
-const DMAP_YMAX = 2.5;     // maximum Y height encoded
 
 // Top-down orthographic camera for depth pass
 const depthCam = new THREE.OrthographicCamera(
