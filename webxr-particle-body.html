@@ -226,6 +226,8 @@ vrmLoader.load(VRM_URL, (gltf) => {
   // Layer 1: depth cam sees only VRM (not particles/HUD/floor)
   vrm.scene.traverse(o => o.layers.enable(1));
   depthCam.layers.set(1);
+  // Wire height map texture into particle shader
+  mat.uniforms.heightMap.value = depthRT.texture;
 }, undefined, (e) => console.error('VRM load error:', e));
 
 // ============================================================
@@ -242,17 +244,37 @@ geom.setAttribute('color', colAttr);
 geom.setAttribute('aSize', sizeAttr);
 
 const mat = new THREE.ShaderMaterial({
-  uniforms: { pointSize: { value: 6.0 }, time: { value: 0.0 } },
+  uniforms: {
+    pointSize: { value: 6.0 },
+    time:      { value: 0.0 },
+    heightMap: { value: null },          // depthRT.texture — set after depthRT created
+    hmCenter:  { value: new THREE.Vector2(0, 2 * MIRROR_PLANE_Z) },
+    hmHalf:    { value: DMAP_HALF },
+    hmYMax:    { value: DMAP_YMAX },
+  },
   vertexShader: `
     attribute vec3  color;
     attribute float aSize;
     varying vec3  vColor;
-    varying float vSize; // pass to frag for edge softness scaling
+    varying float vSize;
     uniform float pointSize;
+    uniform sampler2D heightMap;
+    uniform vec2  hmCenter;
+    uniform float hmHalf;
+    uniform float hmYMax;
     void main() {
       vColor = color;
       vSize  = aSize;
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vec3 pos = position;
+      // Snap particle Y to VRM surface if below it
+      vec2 uv;
+      uv.x = (pos.x - hmCenter.x + hmHalf) / (2.0 * hmHalf);
+      uv.y = (hmCenter.y + hmHalf - pos.z) / (2.0 * hmHalf);
+      if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
+        float surfY = texture2D(heightMap, uv).r * hmYMax;
+        if (surfY > 0.05) pos.y = max(pos.y, surfY);
+      }
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
       gl_PointSize = pointSize * aSize / -mv.z;
       gl_Position = projectionMatrix * mv;
     }
@@ -309,12 +331,13 @@ const depthCam = new THREE.OrthographicCamera(
 depthCam.rotation.set(-Math.PI / 2, 0, 0); // look straight down
 
 const depthRT = new THREE.WebGLRenderTarget(DMAP_SIZE, DMAP_SIZE, {
-  minFilter: THREE.NearestFilter,
-  magFilter: THREE.NearestFilter,
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
   format: THREE.RGBAFormat,
   type: THREE.UnsignedByteType,
 });
-const depthPx = new Uint8Array(DMAP_SIZE * DMAP_SIZE * 4);
+// Wire up texture to particle shader (created above — now depthRT exists)
+// (set in VRM load callback once depthRT.texture is ready; mat.uniforms.heightMap.value = depthRT.texture)
 
 // Shader that encodes world-Y into the red channel (with GPU skinning support)
 const heightEncMat = new THREE.ShaderMaterial({
@@ -344,24 +367,21 @@ const heightEncMat = new THREE.ShaderMaterial({
   side: THREE.FrontSide,
 });
 
-// WebGL2 PBO for async (non-stalling) depth map readback
-const _gl = renderer.getContext();
-let _dmPBO = null, _dmSync = null;
-function _initPBO() {
-  _dmPBO = _gl.createBuffer();
-  _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, _dmPBO);
-  _gl.bufferData(_gl.PIXEL_PACK_BUFFER, DMAP_SIZE * DMAP_SIZE * 4, _gl.STREAM_READ);
-  _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null);
-}
-
-// Joints used for velocity lookup at collision point
-const MJ_JOINTS = ['hips','spine-middle','chest','neck',
-  'left-shoulder','left-arm-upper','left-arm-lower','left-hand-wrist',
-  'right-shoulder','right-arm-upper','right-arm-lower','right-hand-wrist',
-  'left-upper-leg','left-lower-leg','left-foot-ankle',
-  'right-upper-leg','right-lower-leg','right-foot-ankle'];
-const mjPA = new Float32Array(MJ_JOINTS.length * 3); // joint world positions (flat)
-const mjVA = new Float32Array(MJ_JOINTS.length * 3); // joint velocities (flat)
+// CPU body spheres — physics-only, gives velocity response when particles hit body
+// Visual surface shape comes from the GPU height map in the vertex shader
+const BODY_SPHERES = [
+  { j: 'head',               r: 0.14 },
+  { j: 'chest',              r: 0.20 },
+  { j: 'hips',               r: 0.17 },
+  { j: 'left-arm-upper',     r: 0.07 },
+  { j: 'right-arm-upper',    r: 0.07 },
+  { j: 'left-hand-wrist',    r: 0.06 },
+  { j: 'right-hand-wrist',   r: 0.06 },
+  { j: 'left-upper-leg',     r: 0.10 },
+  { j: 'right-upper-leg',    r: 0.10 },
+  { j: 'left-lower-leg',     r: 0.07 },
+  { j: 'right-lower-leg',    r: 0.07 },
+];
 
 let mirrorHipsX = 0, mirrorHipsZ = 2 * MIRROR_PLANE_Z;
 let bodyActive = false;
@@ -377,26 +397,18 @@ const mjv     = {}; // per-joint velocity
 const calibRest = {};
 let isCalibrated = false;
 
-// --- Per-frame GPU depth pass: render VRM top-down, read back height map ---
+// --- Per-frame GPU depth pass: render VRM top-down into depthRT ---
+// depthRT.texture is sampled directly in the particle vertex shader — no readback needed.
 function renderDepthMap() {
   if (!vrm || !vrm.scene.visible) return;
-  if (!_dmPBO) _initPBO();
 
-  // --- Collect previous async readback if GPU is done ---
-  if (_dmSync) {
-    const st = _gl.clientWaitSync(_dmSync, 0, 0); // non-blocking: timeout = 0
-    if (st !== _gl.TIMEOUT_EXPIRED && st !== _gl.WAIT_FAILED) {
-      _gl.deleteSync(_dmSync); _dmSync = null;
-      _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, _dmPBO);
-      _gl.getBufferSubData(_gl.PIXEL_PACK_BUFFER, 0, depthPx);
-      _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null);
-    }
-    // if not ready yet, keep depthPx from previous frame — 1-frame latency is fine
-  }
-
-  // --- Render depth map to depthRT ---
   depthCam.position.set(mirrorHipsX, 2.5, mirrorHipsZ);
   depthCam.updateMatrixWorld();
+
+  // Disable XR for this pass so Three.js uses depthCam as-is instead of
+  // substituting the headset's ArrayCamera.
+  const wasXR = renderer.xr.enabled;
+  renderer.xr.enabled = false;
   try {
     scene.overrideMaterial = heightEncMat;
     renderer.setRenderTarget(depthRT);
@@ -404,23 +416,11 @@ function renderDepthMap() {
     renderer.clear();
     renderer.render(scene, depthCam);
   } finally {
-    scene.overrideMaterial = null;   // always restore, even if render throws
+    scene.overrideMaterial = null;
     renderer.setRenderTarget(null);
+    renderer.xr.enabled = wasXR;
   }
-
-  // --- Kick off async PBO readback (returns immediately) ---
-  if (!_dmSync) {
-    const rtp = renderer.properties.get(depthRT);
-    const fb  = rtp && (Array.isArray(rtp.__webglFramebuffer) ? rtp.__webglFramebuffer[0] : rtp.__webglFramebuffer);
-    if (fb) {
-      _gl.bindFramebuffer(_gl.READ_FRAMEBUFFER, fb);
-      _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, _dmPBO);
-      _gl.readPixels(0, 0, DMAP_SIZE, DMAP_SIZE, _gl.RGBA, _gl.UNSIGNED_BYTE, 0); // async when PBO bound
-      _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null);
-      _gl.bindFramebuffer(_gl.READ_FRAMEBUFFER, null);
-      _dmSync = _gl.fenceSync(_gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-    }
-  }
+  // No readback — particle vertex shader samples depthRT.texture directly on GPU
 }
 
 function updateBodyCollision(frame, refSpace, dt) {
@@ -520,13 +520,8 @@ function updateBodyCollision(frame, refSpace, dt) {
   // Track mirror hips (depth cam and particle cull zone centre)
   if (mj['hips']) { mirrorHipsX = mj['hips'].x; mirrorHipsZ = mj['hips'].z; }
 
-  // Fill flat joint position/velocity arrays for nearest-joint velocity lookup
-  for (let ji = 0; ji < MJ_JOINTS.length; ji++) {
-    const jn = MJ_JOINTS[ji];
-    const p = mj[jn], v = mjv[jn];
-    if (p) { mjPA[ji*3]=p.x; mjPA[ji*3+1]=p.y; mjPA[ji*3+2]=p.z; }
-    if (v) { mjVA[ji*3]=v.x; mjVA[ji*3+1]=v.y; mjVA[ji*3+2]=v.z; }
-  }
+  // Update height-map uniforms so particle vertex shader samples the right region
+  mat.uniforms.hmCenter.value.set(mirrorHipsX, mirrorHipsZ);
 
   // Spawn point above VRM head
   if (mj['head']) {
@@ -600,33 +595,31 @@ function updateParticles(dt) {
       }
     }
 
-    // Height-map body collision — sample GPU depth texture (O(1) per particle)
+    // CPU body sphere collision (physics only — visual shape from GPU height map)
     if (active) {
       const ddx = px-chx, ddz = pz-chz;
       if (ddx*ddx + ddz*ddz < CULL_R2 && py > -0.1 && py < 2.7) {
-        // Map world (px, pz) → pixel (col, row) in the readPixels buffer
-        // depthCam rotation.x=-PI/2 → camera +Y = world -Z, camera +X = world +X
-        // readPixels row 0 = bottom of framebuffer = NDC Y=-1 = world +Z side
-        const pc = Math.floor((px - mirrorHipsX + DMAP_HALF) / (2*DMAP_HALF) * DMAP_SIZE);
-        const pr = Math.floor((mirrorHipsZ + DMAP_HALF - pz) / (2*DMAP_HALF) * DMAP_SIZE);
-        if (pc >= 0 && pc < DMAP_SIZE && pr >= 0 && pr < DMAP_SIZE) {
-          const hy = (depthPx[(pr * DMAP_SIZE + pc) * 4] / 255.0) * DMAP_YMAX;
-          if (hy > 0.05 && py < hy) {
-            py = hy;
-            if (vy < 0) {
-              // find nearest joint for velocity response
-              let nj=0, njd2=1e9;
-              for (let ji=0; ji<MJ_JOINTS.length; ji++) {
-                const dx=mjPA[ji*3]-px, dy=mjPA[ji*3+1]-hy, dz=mjPA[ji*3+2]-pz;
-                const jd2=dx*dx+dy*dy+dz*dz;
-                if (jd2<njd2) { njd2=jd2; nj=ji; }
-              }
-              const jvy2 = mjVA[nj*3+1];
-              vy = jvy2 + (-vy + jvy2) * RESTITUTION; // bounce off moving surface
-              vx *= BODY_STICK; vz *= BODY_STICK;
+        for (let si = 0; si < BODY_SPHERES.length; si++) {
+          const sph = BODY_SPHERES[si];
+          const jp = mj[sph.j]; if (!jp) continue;
+          const ex=px-jp.x, ey=py-jp.y, ez=pz-jp.z;
+          const d2 = ex*ex+ey*ey+ez*ez, r=sph.r;
+          if (d2 >= r*r) continue;
+          const dist = Math.sqrt(d2) || 1e-6;
+          const inv=1/dist, nx=ex*inv, ny=ey*inv, nz=ez*inv;
+          px+=nx*(r-dist); py+=ny*(r-dist); pz+=nz*(r-dist);
+          const jv=mjv[sph.j];
+          if (jv) {
+            const rvx=vx-jv.x, rvy=vy-jv.y, rvz=vz-jv.z;
+            const vn=rvx*nx+rvy*ny+rvz*nz;
+            if (vn<0) {
+              vx=jv.x+(rvx-vn*nx)*BODY_STICK;
+              vy=jv.y+(rvy-vn*ny)*BODY_STICK;
+              vz=jv.z+(rvz-vn*nz)*BODY_STICK;
             }
-            age[i]=1;
           }
+          age[i]=1;
+          break;
         }
       }
     }
