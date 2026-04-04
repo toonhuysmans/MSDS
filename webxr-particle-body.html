@@ -316,12 +316,17 @@ const depthRT = new THREE.WebGLRenderTarget(DMAP_SIZE, DMAP_SIZE, {
 });
 const depthPx = new Uint8Array(DMAP_SIZE * DMAP_SIZE * 4);
 
-// Shader that encodes world-Y into the red channel
+// Shader that encodes world-Y into the red channel (with GPU skinning support)
 const heightEncMat = new THREE.ShaderMaterial({
   vertexShader: `
+    #include <common>
+    #include <skinning_pars_vertex>
     varying float vWorldY;
     void main() {
-      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vec3 transformed = vec3(position);
+      #include <skinbase_vertex>
+      #include <skinning_vertex>
+      vec4 wp = modelMatrix * vec4(transformed, 1.0);
       vWorldY = wp.y;
       gl_Position = projectionMatrix * viewMatrix * wp;
     }
@@ -335,8 +340,19 @@ const heightEncMat = new THREE.ShaderMaterial({
     }
   `,
   uniforms: { yMax: { value: DMAP_YMAX } },
+  defines: { USE_SKINNING: '' },
   side: THREE.FrontSide,
 });
+
+// WebGL2 PBO for async (non-stalling) depth map readback
+const _gl = renderer.getContext();
+let _dmPBO = null, _dmSync = null;
+function _initPBO() {
+  _dmPBO = _gl.createBuffer();
+  _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, _dmPBO);
+  _gl.bufferData(_gl.PIXEL_PACK_BUFFER, DMAP_SIZE * DMAP_SIZE * 4, _gl.STREAM_READ);
+  _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null);
+}
 
 // Joints used for velocity lookup at collision point
 const MJ_JOINTS = ['hips','spine-middle','chest','neck',
@@ -364,19 +380,47 @@ let isCalibrated = false;
 // --- Per-frame GPU depth pass: render VRM top-down, read back height map ---
 function renderDepthMap() {
   if (!vrm || !vrm.scene.visible) return;
+  if (!_dmPBO) _initPBO();
+
+  // --- Collect previous async readback if GPU is done ---
+  if (_dmSync) {
+    const st = _gl.clientWaitSync(_dmSync, 0, 0); // non-blocking: timeout = 0
+    if (st !== _gl.TIMEOUT_EXPIRED && st !== _gl.WAIT_FAILED) {
+      _gl.deleteSync(_dmSync); _dmSync = null;
+      _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, _dmPBO);
+      _gl.getBufferSubData(_gl.PIXEL_PACK_BUFFER, 0, depthPx);
+      _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null);
+    }
+    // if not ready yet, keep depthPx from previous frame — 1-frame latency is fine
+  }
+
+  // --- Render depth map to depthRT ---
   depthCam.position.set(mirrorHipsX, 2.5, mirrorHipsZ);
   depthCam.updateMatrixWorld();
+  try {
+    scene.overrideMaterial = heightEncMat;
+    renderer.setRenderTarget(depthRT);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+    renderer.render(scene, depthCam);
+  } finally {
+    scene.overrideMaterial = null;   // always restore, even if render throws
+    renderer.setRenderTarget(null);
+  }
 
-  const prevOverride = scene.overrideMaterial;
-  scene.overrideMaterial = heightEncMat;
-  renderer.setRenderTarget(depthRT);
-  renderer.setClearColor(0x000000, 1);
-  renderer.clear();
-  renderer.render(scene, depthCam);
-  scene.overrideMaterial = prevOverride;
-  renderer.setRenderTarget(null);
-
-  renderer.readRenderTargetPixels(depthRT, 0, 0, DMAP_SIZE, DMAP_SIZE, depthPx);
+  // --- Kick off async PBO readback (returns immediately) ---
+  if (!_dmSync) {
+    const rtp = renderer.properties.get(depthRT);
+    const fb  = rtp && (Array.isArray(rtp.__webglFramebuffer) ? rtp.__webglFramebuffer[0] : rtp.__webglFramebuffer);
+    if (fb) {
+      _gl.bindFramebuffer(_gl.READ_FRAMEBUFFER, fb);
+      _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, _dmPBO);
+      _gl.readPixels(0, 0, DMAP_SIZE, DMAP_SIZE, _gl.RGBA, _gl.UNSIGNED_BYTE, 0); // async when PBO bound
+      _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null);
+      _gl.bindFramebuffer(_gl.READ_FRAMEBUFFER, null);
+      _dmSync = _gl.fenceSync(_gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    }
+  }
 }
 
 function updateBodyCollision(frame, refSpace, dt) {
