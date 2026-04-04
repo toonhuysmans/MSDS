@@ -43,11 +43,9 @@ const N           = 60_000;  // particle count (200k is too heavy for Quest CPU;
 const GRAVITY     = -1.2;    // m/s² — gentle ash drift
 const AIR_DRAG    =  1.8;    // s⁻¹ — linear drag; terminal velocity ≈ GRAVITY/AIR_DRAG ≈ 0.67 m/s
 const RESTITUTION = 0.04;    // nearly no bounce — ash deadens on impact
-const BODY_STICK  = 0.08;    // tangential velocity retained on body contact
 const FLOOR_STICK = 0.15;    // horizontal velocity retained on floor contact
 const SPAWN_R     = 2.0;     // rain radius around body centre (m)
 const SPAWN_Y     = 4.5;     // rain spawn height (m above floor)
-const CULL_R2         = 1.6*1.6; // collision zone (XZ distance² from mirror hips)
 const MIRROR_PLANE_Z  = -1.5;    // world-Z of the mirror surface (halfway between user and image)
 
 // ============================================================
@@ -178,28 +176,6 @@ const XR_PARENT = {
   'right-foot-ankle':'right-lower-leg',
 };
 
-// Joint name → VRM bone (for world-position extraction)
-const VRM_BONE_FOR_JOINT = {
-  'hips':             VRMHumanBoneName.Hips,
-  'spine-middle':     VRMHumanBoneName.Chest,
-  'chest':            VRMHumanBoneName.UpperChest,
-  'neck':             VRMHumanBoneName.Neck,
-  'head':             VRMHumanBoneName.Head,
-  'left-shoulder':    VRMHumanBoneName.LeftShoulder,
-  'right-shoulder':   VRMHumanBoneName.RightShoulder,
-  'left-arm-upper':   VRMHumanBoneName.LeftUpperArm,
-  'left-arm-lower':   VRMHumanBoneName.LeftLowerArm,
-  'left-hand-wrist':  VRMHumanBoneName.LeftHand,
-  'right-arm-upper':  VRMHumanBoneName.RightUpperArm,
-  'right-arm-lower':  VRMHumanBoneName.RightLowerArm,
-  'right-hand-wrist': VRMHumanBoneName.RightHand,
-  'left-upper-leg':   VRMHumanBoneName.LeftUpperLeg,
-  'left-lower-leg':   VRMHumanBoneName.LeftLowerLeg,
-  'left-foot-ankle':  VRMHumanBoneName.LeftFoot,
-  'right-upper-leg':  VRMHumanBoneName.RightUpperLeg,
-  'right-lower-leg':  VRMHumanBoneName.RightLowerLeg,
-  'right-foot-ankle': VRMHumanBoneName.RightFoot,
-};
 
 let vrm = null;
 let vrmNaturalHipsY = 0.9;
@@ -391,30 +367,11 @@ function renderDepthMap() {
   }
 }
 
-// CPU body spheres — physics collision gives velocity response when particles hit body
-const BODY_SPHERES = [
-  { j: 'head',               r: 0.14 },
-  { j: 'chest',              r: 0.20 },
-  { j: 'hips',               r: 0.17 },
-  { j: 'left-arm-upper',     r: 0.07 },
-  { j: 'right-arm-upper',    r: 0.07 },
-  { j: 'left-hand-wrist',    r: 0.06 },
-  { j: 'right-hand-wrist',   r: 0.06 },
-  { j: 'left-upper-leg',     r: 0.10 },
-  { j: 'right-upper-leg',    r: 0.10 },
-  { j: 'left-lower-leg',     r: 0.07 },
-  { j: 'right-lower-leg',    r: 0.07 },
-];
-
 let mirrorHipsX = 0, mirrorHipsZ = 2 * MIRROR_PLANE_Z;
 let bodyActive = false;
 
-// ============================================================
-// Joint position / velocity caches (populated from VRM bone world positions)
-// ============================================================
-const mj      = {}; // current-frame bone world positions
-const mj_prev = {}; // previous-frame (for velocity)
-const mjv     = {}; // per-joint velocity
+// Joint position cache — used only for hips tracking and spawn point
+const mj = {};
 
 // Virtual T-pose calibration — captured automatically on first valid body frame
 const calibRest = {};
@@ -494,38 +451,21 @@ function updateBodyCollision(frame, refSpace, dt) {
   }
 
   vrm.humanoid.setNormalizedPose(pose);
-  vrm.update(dt);               // apply twist constraints + spring bones first
+  vrm.update(dt);
   vrm.scene.updateMatrixWorld(true);
 
-  // Extract VRM bone world positions → mj[] and compute velocities → mjv[]
-  const invDt = dt > 1e-5 ? 1 / dt : 0;
-  const cl = v => Math.min(10, Math.max(-10, v));
-  for (const [jointName, boneName] of Object.entries(VRM_BONE_FOR_JOINT)) {
-    const boneNode = vrm.humanoid.getNormalizedBoneNode(boneName);
-    if (!boneNode) continue;
-    boneNode.getWorldPosition(_tv);
-    const px = _tv.x, py = _tv.y, pz = _tv.z;
-    if (!mj[jointName])      mj[jointName]      = { x: px, y: py, z: pz };
-    if (!mj_prev[jointName]) mj_prev[jointName] = { x: px, y: py, z: pz };
-    if (!mjv[jointName])     mjv[jointName]     = { x: 0, y: 0, z: 0 };
-    mjv[jointName].x = cl((px - mj_prev[jointName].x) * invDt);
-    mjv[jointName].y = cl((py - mj_prev[jointName].y) * invDt);
-    mjv[jointName].z = cl((pz - mj_prev[jointName].z) * invDt);
-    mj_prev[jointName].x = px; mj_prev[jointName].y = py; mj_prev[jointName].z = pz;
-    mj[jointName].x = px;      mj[jointName].y = py;      mj[jointName].z = pz;
+  // Read hips + head world positions for depth cam centre and spawn point
+  const hipsNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Hips);
+  const headNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Head);
+  if (hipsNode) {
+    hipsNode.getWorldPosition(_tv);
+    mirrorHipsX = _tv.x; mirrorHipsZ = _tv.z;
+    mat.uniforms.hmCenter.value.set(mirrorHipsX, mirrorHipsZ);
   }
-
-  // Track mirror hips (depth cam centre + particle cull zone)
-  if (mj['hips']) { mirrorHipsX = mj['hips'].x; mirrorHipsZ = mj['hips'].z; }
-  mat.uniforms.hmCenter.value.set(mirrorHipsX, mirrorHipsZ);
-
-  // Spawn point above VRM head
-  if (mj['head']) {
-    spawnX = mj['head'].x;
-    spawnY = mj['head'].y + 2.5;
-    spawnZ = mj['head'].z;
-    floorRing.position.x = spawnX;
-    floorRing.position.z = spawnZ;
+  if (headNode) {
+    headNode.getWorldPosition(_tv);
+    spawnX = _tv.x; spawnY = _tv.y + 2.5; spawnZ = _tv.z;
+    floorRing.position.x = spawnX; floorRing.position.z = spawnZ;
   }
 
   bodyActive = vrm !== null && vrm.scene.visible;
@@ -539,8 +479,6 @@ function updateParticles(dt) {
   const dtAD   = AIR_DRAG * dt;    // per-particle drag = dtAD / mass
   const decay  = dt * 5.0;
   const cx = spawnX, cy = spawnY, cz = spawnZ;
-  const chx = mirrorHipsX, chz = mirrorHipsZ; // cull centre at mirror hips
-  const active = bodyActive;
 
   for (let i = 0; i < N; i++) {
     const ix = i*3, iy = ix+1, iz = ix+2;
@@ -588,35 +526,6 @@ function updateParticles(dt) {
         pos[ix]=px; pos[iy]=py; pos[iz]=pz;
         vel[ix]=0; vel[iy]=0; vel[iz]=0;
         continue;
-      }
-    }
-
-    // CPU body sphere collision (physics only — visual shape from GPU height map)
-    if (active) {
-      const ddx = px-chx, ddz = pz-chz;
-      if (ddx*ddx + ddz*ddz < CULL_R2 && py > -0.1 && py < 2.7) {
-        for (let si = 0; si < BODY_SPHERES.length; si++) {
-          const sph = BODY_SPHERES[si];
-          const jp = mj[sph.j]; if (!jp) continue;
-          const ex=px-jp.x, ey=py-jp.y, ez=pz-jp.z;
-          const d2 = ex*ex+ey*ey+ez*ez, r=sph.r;
-          if (d2 >= r*r) continue;
-          const dist = Math.sqrt(d2) || 1e-6;
-          const inv=1/dist, nx=ex*inv, ny=ey*inv, nz=ez*inv;
-          px+=nx*(r-dist); py+=ny*(r-dist); pz+=nz*(r-dist);
-          const jv=mjv[sph.j];
-          if (jv) {
-            const rvx=vx-jv.x, rvy=vy-jv.y, rvz=vz-jv.z;
-            const vn=rvx*nx+rvy*ny+rvz*nz;
-            if (vn<0) {
-              vx=jv.x+(rvx-vn*nx)*BODY_STICK;
-              vy=jv.y+(rvy-vn*ny)*BODY_STICK;
-              vz=jv.z+(rvz-vn*nz)*BODY_STICK;
-            }
-          }
-          age[i]=1;
-          break;
-        }
       }
     }
 
