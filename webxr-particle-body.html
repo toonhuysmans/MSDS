@@ -37,6 +37,7 @@ import * as THREE from 'three';
 // ============================================================
 const N           = 200_000; // particle count
 const GRAVITY     = -1.2;    // m/s² — gentle ash drift
+const AIR_DRAG    =  1.8;    // s⁻¹ — linear drag; terminal velocity ≈ GRAVITY/AIR_DRAG ≈ 0.67 m/s
 const RESTITUTION = 0.04;    // nearly no bounce — ash deadens on impact
 const BODY_STICK  = 0.08;    // tangential velocity retained on body contact
 const FLOOR_STICK = 0.15;    // horizontal velocity retained on floor contact
@@ -301,6 +302,7 @@ function updateBodyCollision(frame, refSpace) {
 // ============================================================
 function updateParticles(dt) {
   const dtG   = GRAVITY * dt;
+  const dm    = 1 - AIR_DRAG * dt; // linear drag multiplier (~0.971 at 60 fps)
   const decay = dt * 5.0;
   const cx = spawnX, cy = spawnY, cz = spawnZ;
   const chx = mirrorHipsX, chz = mirrorHipsZ; // cull centre at mirror hips
@@ -326,7 +328,9 @@ function updateParticles(dt) {
     let px = pos[ix], py = pos[iy], pz = pos[iz];
     let vx = vel[ix], vy = vel[iy], vz = vel[iz];
 
-    vy += dtG;
+    vx *= dm;
+    vy  = vy * dm + dtG; // drag + gravity; limits fall speed to ~0.67 m/s
+    vz *= dm;
     px += vx * dt;
     py += vy * dt;
     pz += vz * dt;
