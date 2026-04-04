@@ -20,7 +20,9 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js"
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2/lib/three-vrm.module.js"
   }
 }
 </script>
@@ -31,6 +33,8 @@
 
 <script type="module">
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMHumanBoneName } from '@pixiv/three-vrm';
 
 // ============================================================
 // Config — tune N down if frame-rate drops
@@ -117,6 +121,110 @@ const floorRing = new THREE.Mesh(
 floorRing.rotation.x = -Math.PI / 2;
 floorRing.position.set(0, 0.001, 2 * MIRROR_PLANE_Z);
 scene.add(floorRing);
+
+// ============================================================
+// VRM mirror body — driven from body tracking, rendered ghostly
+// ============================================================
+const VRM_URL = 'https://raw.githubusercontent.com/pixiv/three-vrm/dev/packages/three-vrm/examples/models/VRM1_Constraint_Twist_Sample.vrm';
+const _Qy180    = new THREE.Quaternion(0, 1, 0, 0);
+const _Qy180inv = new THREE.Quaternion(0, -1, 0, 0);
+const _tv = new THREE.Vector3();
+
+// XR body joint → VRM humanoid bone (for pose driving)
+const XR_TO_VRM = {
+  'hips':             VRMHumanBoneName.Hips,
+  'spine-lower':      VRMHumanBoneName.Spine,
+  'spine-middle':     VRMHumanBoneName.Chest,
+  'spine-upper':      VRMHumanBoneName.UpperChest,
+  'neck':             VRMHumanBoneName.Neck,
+  'head':             VRMHumanBoneName.Head,
+  'left-shoulder':    VRMHumanBoneName.LeftShoulder,
+  'left-arm-upper':   VRMHumanBoneName.LeftUpperArm,
+  'left-arm-lower':   VRMHumanBoneName.LeftLowerArm,
+  'left-hand-wrist':  VRMHumanBoneName.LeftHand,
+  'right-shoulder':   VRMHumanBoneName.RightShoulder,
+  'right-arm-upper':  VRMHumanBoneName.RightUpperArm,
+  'right-arm-lower':  VRMHumanBoneName.RightLowerArm,
+  'right-hand-wrist': VRMHumanBoneName.RightHand,
+  'left-upper-leg':   VRMHumanBoneName.LeftUpperLeg,
+  'left-lower-leg':   VRMHumanBoneName.LeftLowerLeg,
+  'left-foot-ankle':  VRMHumanBoneName.LeftFoot,
+  'right-upper-leg':  VRMHumanBoneName.RightUpperLeg,
+  'right-lower-leg':  VRMHumanBoneName.RightLowerLeg,
+  'right-foot-ankle': VRMHumanBoneName.RightFoot,
+};
+
+// Parent-first drive order
+const BONE_DRIVE_ORDER = [
+  'hips',
+  'spine-lower', 'spine-middle', 'spine-upper', 'neck', 'head',
+  'left-shoulder',   'left-arm-upper',   'left-arm-lower',   'left-hand-wrist',
+  'right-shoulder',  'right-arm-upper',  'right-arm-lower',  'right-hand-wrist',
+  'left-upper-leg',  'left-lower-leg',   'left-foot-ankle',
+  'right-upper-leg', 'right-lower-leg',  'right-foot-ankle',
+];
+
+// XR joint parent chain
+const XR_PARENT = {
+  'spine-lower':     'hips',       'spine-middle':    'spine-lower',
+  'spine-upper':     'spine-middle','neck':            'spine-upper',
+  'head':            'neck',
+  'left-shoulder':   'spine-upper', 'left-arm-upper':  'left-shoulder',
+  'left-arm-lower':  'left-arm-upper','left-hand-wrist':'left-arm-lower',
+  'right-shoulder':  'spine-upper', 'right-arm-upper': 'right-shoulder',
+  'right-arm-lower': 'right-arm-upper','right-hand-wrist':'right-arm-lower',
+  'left-upper-leg':  'hips',        'left-lower-leg':  'left-upper-leg',
+  'left-foot-ankle': 'left-lower-leg',
+  'right-upper-leg': 'hips',        'right-lower-leg': 'right-upper-leg',
+  'right-foot-ankle':'right-lower-leg',
+};
+
+// COLL_SEGS joint name → VRM bone (for world-position extraction)
+const VRM_BONE_FOR_JOINT = {
+  'hips':             VRMHumanBoneName.Hips,
+  'spine-middle':     VRMHumanBoneName.Chest,
+  'chest':            VRMHumanBoneName.UpperChest,
+  'neck':             VRMHumanBoneName.Neck,
+  'head':             VRMHumanBoneName.Head,
+  'left-shoulder':    VRMHumanBoneName.LeftShoulder,
+  'right-shoulder':   VRMHumanBoneName.RightShoulder,
+  'left-arm-upper':   VRMHumanBoneName.LeftUpperArm,
+  'left-arm-lower':   VRMHumanBoneName.LeftLowerArm,
+  'left-hand-wrist':  VRMHumanBoneName.LeftHand,
+  'right-arm-upper':  VRMHumanBoneName.RightUpperArm,
+  'right-arm-lower':  VRMHumanBoneName.RightLowerArm,
+  'right-hand-wrist': VRMHumanBoneName.RightHand,
+  'left-upper-leg':   VRMHumanBoneName.LeftUpperLeg,
+  'left-lower-leg':   VRMHumanBoneName.LeftLowerLeg,
+  'left-foot-ankle':  VRMHumanBoneName.LeftFoot,
+  'right-upper-leg':  VRMHumanBoneName.RightUpperLeg,
+  'right-lower-leg':  VRMHumanBoneName.RightLowerLeg,
+  'right-foot-ankle': VRMHumanBoneName.RightFoot,
+};
+
+let vrm = null;
+let vrmNaturalHipsY = 0.9;
+
+const _ghostMat = new THREE.MeshStandardMaterial({
+  color: 0x2244cc, emissive: 0x112266,
+  transparent: true, opacity: 0.22, depthWrite: false,
+  roughness: 1.0, metalness: 0.0, blending: THREE.AdditiveBlending,
+});
+
+const vrmLoader = new GLTFLoader();
+vrmLoader.register(parser => new VRMLoaderPlugin(parser));
+vrmLoader.load(VRM_URL, (gltf) => {
+  vrm = gltf.userData.vrm;
+  vrm.lookAt = undefined;
+  vrm.scene.traverse(obj => {
+    if (obj.isMesh) { obj.material = _ghostMat; obj.renderOrder = 1; }
+  });
+  // Sample natural hips height for scene positioning
+  vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Hips).getWorldPosition(_tv);
+  vrmNaturalHipsY = _tv.y;
+  vrm.scene.visible = false;
+  scene.add(vrm.scene);
+}, undefined, (e) => console.error('VRM load error:', e));
 
 // ============================================================
 // Particle geometry
@@ -214,45 +322,6 @@ const COLL_SEGS = [
 ];
 
 // ============================================================
-// Armature — line skeleton drawn over the collision segments
-// ============================================================
-const armatureSegs = (COLL_SEGS.length + 1) * 2; // +1 for head-to-neck line
-const armPos = new Float32Array(armatureSegs * 3);
-const armGeom = new THREE.BufferGeometry();
-const armAttr = new THREE.BufferAttribute(armPos, 3);
-armAttr.setUsage(THREE.DynamicDrawUsage);
-armGeom.setAttribute('position', armAttr);
-const armMesh = new THREE.LineSegments(armGeom, new THREE.LineBasicMaterial({
-  color: 0x2255aa,
-  transparent: true,
-  opacity: 0.35,
-  depthWrite: false,
-  blending: THREE.AdditiveBlending,
-}));
-scene.add(armMesh);
-armMesh.visible = false;
-
-function updateArmature() {
-  let v = 0;
-  for (const [a, b] of COLL_SEGS) {
-    if (mj[a] && mj[b]) {
-      armPos[v++]=mj[a].x; armPos[v++]=mj[a].y; armPos[v++]=mj[a].z;
-      armPos[v++]=mj[b].x; armPos[v++]=mj[b].y; armPos[v++]=mj[b].z;
-    } else {
-      for (let k = 0; k < 6; k++) armPos[v++] = 0;
-    }
-  }
-  // Head sphere centre to neck
-  if (mj['head'] && mj['neck']) {
-    armPos[v++]=headX; armPos[v++]=headY; armPos[v++]=headZ;
-    armPos[v++]=mj['neck'].x; armPos[v++]=mj['neck'].y; armPos[v++]=mj['neck'].z;
-  } else { for (let k = 0; k < 6; k++) armPos[v++] = 0; }
-  armAttr.needsUpdate = true;
-  armGeom.setDrawRange(0, v / 3);
-  armMesh.visible = bodyActive;
-}
-
-// ============================================================
 // Collision capsule buffer  [ax ay az bx by bz r r² jvx jvy jvz] × MAX_CAPS
 // ============================================================
 const MAX_CAPS  = 24;
@@ -276,69 +345,95 @@ function setCap(j, ax, ay, az, bx, by, bz, r, jvx, jvy, jvz) {
 }
 
 // ============================================================
-// Update capsule positions from body tracking
+// Joint position / velocity caches (populated from VRM bone world positions)
 // ============================================================
-const jp      = {}; // real joint position cache
-const jp_prev = {}; // previous-frame real joint positions
-const mj      = {}; // mirrored joint position cache
-const mjv     = {}; // mirrored joint velocity cache
-
-function mirrorJoint(name, dt) {
-  if (!jp[name]) return;
-  if (!mj[name])  mj[name]  = { x:0, y:0, z:0 };
-  if (!mjv[name]) mjv[name] = { x:0, y:0, z:0 };
-  mj[name].x = jp[name].x;
-  mj[name].y = jp[name].y;
-  mj[name].z = 2 * MIRROR_PLANE_Z - jp[name].z;
-  // velocity: X/Y unchanged, Z negated (mirror flips Z axis)
-  if (jp_prev[name]) {
-    const s = Math.min(1 / dt, 10); // clamp velocity to 10 m/s to suppress tracking noise
-    const rvx = (jp[name].x - jp_prev[name].x) * s;
-    const rvy = (jp[name].y - jp_prev[name].y) * s;
-    const rvz = (jp[name].z - jp_prev[name].z) * s;
-    mjv[name].x = rvx; mjv[name].y = rvy; mjv[name].z = -rvz;
-  } else {
-    mjv[name].x = 0; mjv[name].y = 0; mjv[name].z = 0;
-  }
-  if (!jp_prev[name]) jp_prev[name] = { x:0, y:0, z:0 };
-  jp_prev[name].x = jp[name].x;
-  jp_prev[name].y = jp[name].y;
-  jp_prev[name].z = jp[name].z;
-}
+const mj      = {}; // current-frame bone world positions
+const mj_prev = {}; // previous-frame (for velocity)
+const mjv     = {}; // per-joint velocity
 
 function updateBodyCollision(frame, refSpace, dt) {
   const body = frame.body;
-  if (!body) { bodyActive = false; return; }
+  if (!body || !vrm) { bodyActive = false; return; }
 
-  for (const [name, space] of body) {
-    const pose = frame.getPose(space, refSpace);
-    if (pose) {
-      const p = pose.transform.position;
-      if (!jp[name]) jp[name] = { x:0, y:0, z:0 };
-      jp[name].x = p.x; jp[name].y = p.y; jp[name].z = p.z;
+  const hipsSpace = body.get('hips');
+  if (!hipsSpace) { bodyActive = false; return; }
+  const hipsPose = frame.getPose(hipsSpace, refSpace);
+  if (!hipsPose) { bodyActive = false; return; }
+
+  // Position VRM at Z-mirrored location, same X/Y as real hips
+  const hp = hipsPose.transform.position;
+  vrm.scene.position.set(hp.x, hp.y - vrmNaturalHipsY, 2 * MIRROR_PLANE_Z - hp.z);
+  vrm.scene.visible = true;
+
+  // Drive VRM bones from body tracking (relative quaternions + Y180 mirror correction)
+  const pose = {};
+  for (const xrJoint of BONE_DRIVE_ORDER) {
+    const boneName = XR_TO_VRM[xrJoint];
+    if (!boneName) continue;
+    const jSpace = body.get(xrJoint);
+    if (!jSpace) continue;
+    const jPose = frame.getPose(jSpace, refSpace);
+    if (!jPose) continue;
+    const jq = jPose.transform.orientation;
+    const jointQuat = new THREE.Quaternion(jq.x, jq.y, jq.z, jq.w);
+
+    const parentXR = XR_PARENT[xrJoint];
+    let finalQuat;
+    if (parentXR) {
+      const pSpace = body.get(parentXR);
+      if (pSpace) {
+        const pPose = frame.getPose(pSpace, refSpace);
+        if (pPose) {
+          const pq = pPose.transform.orientation;
+          const parentQuat = new THREE.Quaternion(pq.x, pq.y, pq.z, pq.w);
+          finalQuat = parentQuat.clone().invert().multiply(jointQuat);
+          finalQuat.premultiply(_Qy180).multiply(_Qy180inv);
+        }
+      }
+    } else {
+      finalQuat = jointQuat.clone().premultiply(_Qy180).multiply(_Qy180inv);
     }
+    if (!finalQuat) continue;
+    pose[boneName] = { rotation: [finalQuat.x, finalQuat.y, finalQuat.z, finalQuat.w] };
   }
 
-  // Compute mirrored skeleton + velocities
-  for (const name of Object.keys(jp)) mirrorJoint(name, dt);
+  vrm.humanoid.setNormalizedPose(pose);
+  vrm.scene.updateMatrixWorld(true);
 
-  // Track mirror hips for culling
+  // Extract VRM bone world positions → mj[] and compute velocities → mjv[]
+  const invDt = dt > 1e-5 ? 1 / dt : 0;
+  const cl = v => Math.min(10, Math.max(-10, v));
+  for (const [jointName, boneName] of Object.entries(VRM_BONE_FOR_JOINT)) {
+    const boneNode = vrm.humanoid.getNormalizedBoneNode(boneName);
+    if (!boneNode) continue;
+    boneNode.getWorldPosition(_tv);
+    const px = _tv.x, py = _tv.y, pz = _tv.z;
+    if (!mj[jointName])      mj[jointName]      = { x: px, y: py, z: pz };
+    if (!mj_prev[jointName]) mj_prev[jointName] = { x: px, y: py, z: pz };
+    if (!mjv[jointName])     mjv[jointName]     = { x: 0, y: 0, z: 0 };
+    mjv[jointName].x = cl((px - mj_prev[jointName].x) * invDt);
+    mjv[jointName].y = cl((py - mj_prev[jointName].y) * invDt);
+    mjv[jointName].z = cl((pz - mj_prev[jointName].z) * invDt);
+    mj_prev[jointName].x = px; mj_prev[jointName].y = py; mj_prev[jointName].z = pz;
+    mj[jointName].x = px;      mj[jointName].y = py;      mj[jointName].z = pz;
+  }
+
+  // Track mirror hips for particle culling zone
   if (mj['hips']) { mirrorHipsX = mj['hips'].x; mirrorHipsZ = mj['hips'].z; }
 
-  // Build capsules with average endpoint velocity
+  // Build collision capsule buffer from VRM bone positions
   numCaps = 0;
   for (const [a, b, r] of COLL_SEGS) {
     if (mj[a] && mj[b]) {
-      const va = mjv[a] || mjv[a]; // always exists after mirrorJoint
-      const vb = mjv[b] || mjv[a];
-      const avx = (va.x + vb.x) * 0.5;
-      const avy = (va.y + vb.y) * 0.5;
-      const avz = (va.z + vb.z) * 0.5;
-      setCap(numCaps++, mj[a].x, mj[a].y, mj[a].z, mj[b].x, mj[b].y, mj[b].z, r, avx, avy, avz);
+      const va = mjv[a], vb = mjv[b];
+      setCap(numCaps++,
+        mj[a].x, mj[a].y, mj[a].z,
+        mj[b].x, mj[b].y, mj[b].z, r,
+        (va.x + vb.x) * 0.5, (va.y + vb.y) * 0.5, (va.z + vb.z) * 0.5);
     }
   }
 
-  // Mirror head
+  // Spawn point above VRM head
   if (mj['head']) {
     headX = mj['head'].x; headY = mj['head'].y + 0.04; headZ = mj['head'].z;
     if (mjv['head']) { headVX = mjv['head'].x; headVY = mjv['head'].y; headVZ = mjv['head'].z; }
@@ -350,7 +445,6 @@ function updateBodyCollision(frame, refSpace, dt) {
   }
 
   bodyActive = numCaps > 0;
-  updateArmature();
 }
 
 // ============================================================
@@ -576,6 +670,7 @@ renderer.setAnimationLoop((ts, frame) => {
   }
 
   mat.uniforms.time.value = ts / 1000;
+  if (vrm) vrm.update(dt);
   updateParticles(dt);
   renderer.render(scene, camera);
 });
