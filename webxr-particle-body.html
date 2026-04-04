@@ -252,9 +252,13 @@ const mat = new THREE.ShaderMaterial({
       uv.y = (hmCenter.y + hmHalf - pos.z) / (2.0 * hmHalf);
       if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
         float surfY = texture2D(heightMap, uv).r * hmYMax;
-        // Snap any particle below the surface up to it.
-        // Particles still above (falling) are unaffected: max(falling_y, surfY) = falling_y.
-        if (surfY > 0.05) pos.y = max(pos.y, surfY);
+        // Snap particles that are within 0.35 m below the surface up to it.
+        // - Particles still above (falling) are unaffected (diff < 0).
+        // - Particles more than 35 cm below escape the snap — so a fast
+        //   arm swing (>35 cm/frame ~2.5 m/s) leaves particles behind,
+        //   giving natural shake-off behaviour.
+        float diff = surfY - pos.y;
+        if (surfY > 0.05 && diff > 0.0 && diff < 0.35) pos.y = surfY;
       }
       vec4 mv = modelViewMatrix * vec4(pos, 1.0);
       gl_PointSize = pointSize * aSize / -mv.z;
