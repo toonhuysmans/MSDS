@@ -75,9 +75,9 @@ const propSize = new Float32Array(N); // point size multiplier
 const propMass = new Float32Array(N); // affects gravity & drag (heavy falls fast; light floats)
 const propGlow = new Float32Array(N); // heat sensitivity multiplier
 for (let i = 0; i < N; i++) {
-  propSize[i] = 0.3 + Math.random() * Math.random() * 3.0; // skewed: mostly small, rare large
-  propMass[i] = 0.4 + Math.random() * 1.6;                  // 0.4 (feather) – 2.0 (heavy)
-  propGlow[i] = 0.3 + Math.random() * 2.5;                  // 0.3 (barely glows) – 2.8 (hair-trigger)
+  propSize[i] = 0.4 + Math.random() * Math.random() * 1.2; // skewed 0.4–1.6, mostly fine ash
+  propMass[i] = 0.7 + Math.random() * 0.5;                  // 0.7–1.2, ash is uniformly light
+  propGlow[i] = 0.6 + Math.random() * 0.7;                  // 0.6–1.3, subtle ember variation
 }
 
 let spawnX = 0, spawnY = 4.5, spawnZ = 2 * MIRROR_PLANE_Z; // updated each frame from mirrored head joint
