@@ -223,7 +223,9 @@ vrmLoader.load(VRM_URL, (gltf) => {
   vrmNaturalHipsY = _tv.y;
   vrm.scene.visible = false;
   scene.add(vrm.scene);
-  setupMeshCollision(vrm);
+  // Layer 1: depth cam sees only VRM (not particles/HUD/floor)
+  vrm.scene.traverse(o => o.layers.enable(1));
+  depthCam.layers.set(1);
 }, undefined, (e) => console.error('VRM load error:', e));
 
 // ============================================================
@@ -292,24 +294,51 @@ points.frustumCulled = false;
 scene.add(points);
 
 // ============================================================
-// Mesh collision — CPU skinning + grid hash each frame
+// GPU height-map collision
 // ============================================================
-let meshSkel = null;
-let meshBindV = null;   // bind-space vertices (pre-multiplied by bindMatrixInverse per mesh)
-let meshSkinI = null;   // Uint16Array: skinIndex (4 per vertex)
-let meshSkinW = null;   // Float32Array: skinWeight (4 per vertex)
-let meshTri   = null;   // Uint32Array: triangle indices
-let meshWorld = null;   // Float32Array: world-space vertices this frame
-let meshNV = 0, meshNT = 0;
+const DMAP_SIZE = 128;     // render target resolution
+const DMAP_HALF = 1.0;     // half-extent in world metres (2 m × 2 m coverage)
+const DMAP_YMAX = 2.5;     // maximum Y height encoded
 
-const MCELL = 0.10;                      // grid cell size (10 cm)
-const MGX = 24, MGY = 32, MGZ = 16;     // grid dimensions
-const MBCAP = 48;                        // max triangles per cell
-const mGCnt = new Int16Array(MGX * MGY * MGZ);
-const mGDat = new Uint32Array(MGX * MGY * MGZ * MBCAP);
-let mGox = 0, mGoy = -0.1, mGoz = 0;   // grid world origin
+// Top-down orthographic camera for depth pass
+const depthCam = new THREE.OrthographicCamera(
+  -DMAP_HALF, DMAP_HALF,   // left, right → world X
+   DMAP_HALF, -DMAP_HALF,  // top, bottom → world Z (camera up = -Z)
+  0.01, 3.5
+);
+depthCam.rotation.set(-Math.PI / 2, 0, 0); // look straight down
 
-// Joints used for velocity lookup (nearest joint to collision point)
+const depthRT = new THREE.WebGLRenderTarget(DMAP_SIZE, DMAP_SIZE, {
+  minFilter: THREE.NearestFilter,
+  magFilter: THREE.NearestFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.UnsignedByteType,
+});
+const depthPx = new Uint8Array(DMAP_SIZE * DMAP_SIZE * 4);
+
+// Shader that encodes world-Y into the red channel
+const heightEncMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    varying float vWorldY;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorldY = wp.y;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    varying float vWorldY;
+    uniform float yMax;
+    void main() {
+      float t = clamp(vWorldY / yMax, 0.0, 1.0);
+      gl_FragColor = vec4(t, 0.0, 0.0, 1.0);
+    }
+  `,
+  uniforms: { yMax: { value: DMAP_YMAX } },
+  side: THREE.FrontSide,
+});
+
+// Joints used for velocity lookup at collision point
 const MJ_JOINTS = ['hips','spine-middle','chest','neck',
   'left-shoulder','left-arm-upper','left-arm-lower','left-hand-wrist',
   'right-shoulder','right-arm-upper','right-arm-lower','right-hand-wrist',
@@ -332,82 +361,22 @@ const mjv     = {}; // per-joint velocity
 const calibRest = {};
 let isCalibrated = false;
 
-// --- Mesh collision setup (called once after VRM loads) ---
-function setupMeshCollision(vrmRef) {
-  const bv = new THREE.Vector3();
-  const allPos=[], allSI=[], allSW=[], allIdx=[];
-  let vOff = 0;
-  vrmRef.scene.traverse(obj => {
-    if (!obj.isSkinnedMesh) return;
-    if (!meshSkel) meshSkel = obj.skeleton;
-    const geo = obj.geometry;
-    const pos = geo.attributes.position.array;
-    const si  = geo.attributes.skinIndex.array;
-    const sw  = geo.attributes.skinWeight.array;
-    const nv  = pos.length / 3;
-    const bmi = obj.bindMatrixInverse;
-    for (let i = 0; i < nv; i++) {
-      bv.set(pos[i*3], pos[i*3+1], pos[i*3+2]);
-      bv.applyMatrix4(bmi);
-      allPos.push(bv.x, bv.y, bv.z);
-      allSI.push(si[i*4]||0, si[i*4+1]||0, si[i*4+2]||0, si[i*4+3]||0);
-      allSW.push(sw[i*4]||0, sw[i*4+1]||0, sw[i*4+2]||0, sw[i*4+3]||0);
-    }
-    if (geo.index) {
-      for (const idx of geo.index.array) allIdx.push(idx + vOff);
-    } else {
-      for (let i = 0; i < nv; i++) allIdx.push(i + vOff);
-    }
-    vOff += nv;
-  });
-  meshNV = vOff; meshNT = allIdx.length / 3;
-  meshBindV = new Float32Array(allPos);
-  meshSkinI = new Uint16Array(allSI);
-  meshSkinW = new Float32Array(allSW);
-  meshTri   = new Uint32Array(allIdx);
-  meshWorld = new Float32Array(meshNV * 3);
-  console.log(`Mesh collision: ${meshNV} verts, ${meshNT} tris`);
-}
+// --- Per-frame GPU depth pass: render VRM top-down, read back height map ---
+function renderDepthMap() {
+  if (!vrm || !vrm.scene.visible) return;
+  depthCam.position.set(mirrorHipsX, 2.5, mirrorHipsZ);
+  depthCam.updateMatrixWorld();
 
-// --- Per-frame CPU skinning ---
-function skinMesh() {
-  meshSkel.update();
-  const bm = meshSkel.boneMatrices;
-  for (let i = 0; i < meshNV; i++) {
-    const ix = i*3, si4 = i*4;
-    const lx = meshBindV[ix], ly = meshBindV[ix+1], lz = meshBindV[ix+2];
-    let fx=0, fy=0, fz=0;
-    for (let j = 0; j < 4; j++) {
-      const w = meshSkinW[si4+j]; if (w <= 0) continue;
-      const m = meshSkinI[si4+j] * 16;
-      fx += w*(bm[m]*lx + bm[m+4]*ly + bm[m+8]*lz  + bm[m+12]);
-      fy += w*(bm[m+1]*lx + bm[m+5]*ly + bm[m+9]*lz  + bm[m+13]);
-      fz += w*(bm[m+2]*lx + bm[m+6]*ly + bm[m+10]*lz + bm[m+14]);
-    }
-    meshWorld[ix]=fx; meshWorld[ix+1]=fy; meshWorld[ix+2]=fz;
-  }
-}
+  const prevOverride = scene.overrideMaterial;
+  scene.overrideMaterial = heightEncMat;
+  renderer.setRenderTarget(depthRT);
+  renderer.setClearColor(0x000000, 1);
+  renderer.clear();
+  renderer.render(scene, depthCam);
+  scene.overrideMaterial = prevOverride;
+  renderer.setRenderTarget(null);
 
-// --- Per-frame spatial grid rebuild ---
-function buildMeshGrid() {
-  mGox = mirrorHipsX - MGX*MCELL*0.5;
-  mGoy = -0.1;
-  mGoz = mirrorHipsZ - MGZ*MCELL*0.5;
-  mGCnt.fill(0);
-  const v = meshWorld, t = meshTri;
-  for (let i = 0; i < meshNT; i++) {
-    const ai=t[i*3]*3, bi=t[i*3+1]*3, ci=t[i*3+2]*3;
-    const x0=Math.max(0,   Math.floor((Math.min(v[ai],  v[bi],  v[ci])  - mGox)/MCELL));
-    const x1=Math.min(MGX-1,Math.floor((Math.max(v[ai],  v[bi],  v[ci])  - mGox)/MCELL));
-    const y0=Math.max(0,   Math.floor((Math.min(v[ai+1],v[bi+1],v[ci+1])- mGoy)/MCELL));
-    const y1=Math.min(MGY-1,Math.floor((Math.max(v[ai+1],v[bi+1],v[ci+1])- mGoy)/MCELL));
-    const z0=Math.max(0,   Math.floor((Math.min(v[ai+2],v[bi+2],v[ci+2])- mGoz)/MCELL));
-    const z1=Math.min(MGZ-1,Math.floor((Math.max(v[ai+2],v[bi+2],v[ci+2])- mGoz)/MCELL));
-    for (let gx=x0;gx<=x1;gx++) for (let gy=y0;gy<=y1;gy++) for (let gz=z0;gz<=z1;gz++) {
-      const gcell=(gx*MGY+gy)*MGZ+gz, cnt=mGCnt[gcell];
-      if (cnt < MBCAP) { mGDat[gcell*MBCAP+cnt]=i; mGCnt[gcell]=cnt+1; }
-    }
-  }
+  renderer.readRenderTargetPixels(depthRT, 0, 0, DMAP_SIZE, DMAP_SIZE, depthPx);
 }
 
 function updateBodyCollision(frame, refSpace, dt) {
@@ -504,14 +473,8 @@ function updateBodyCollision(frame, refSpace, dt) {
     mj[jointName].x = px;      mj[jointName].y = py;      mj[jointName].z = pz;
   }
 
-  // Track mirror hips for particle culling zone and grid centering
+  // Track mirror hips (depth cam and particle cull zone centre)
   if (mj['hips']) { mirrorHipsX = mj['hips'].x; mirrorHipsZ = mj['hips'].z; }
-
-  // CPU-skin the VRM mesh and rebuild grid for this frame
-  if (meshSkel) {
-    skinMesh();
-    buildMeshGrid();
-  }
 
   // Fill flat joint position/velocity arrays for nearest-joint velocity lookup
   for (let ji = 0; ji < MJ_JOINTS.length; ji++) {
@@ -530,7 +493,7 @@ function updateBodyCollision(frame, refSpace, dt) {
     floorRing.position.z = spawnZ;
   }
 
-  bodyActive = meshSkel !== null;
+  bodyActive = vrm !== null && vrm.scene.visible;
 }
 
 // ============================================================
@@ -593,101 +556,32 @@ function updateParticles(dt) {
       }
     }
 
-    // Mesh SDF body collision — closest-point-on-triangle + spatial grid
+    // Height-map body collision — sample GPU depth texture (O(1) per particle)
     if (active) {
       const ddx = px-chx, ddz = pz-chz;
       if (ddx*ddx + ddz*ddz < CULL_R2 && py > -0.1 && py < 2.7) {
-        const GR = MCELL; // search radius (one grid cell = 10 cm)
-        const gx0=Math.max(0,    Math.floor((px-GR-mGox)/MCELL));
-        const gx1=Math.min(MGX-1,Math.floor((px+GR-mGox)/MCELL));
-        const gy0=Math.max(0,    Math.floor((py-GR-mGoy)/MCELL));
-        const gy1=Math.min(MGY-1,Math.floor((py+GR-mGoy)/MCELL));
-        const gz0=Math.max(0,    Math.floor((pz-GR-mGoz)/MCELL));
-        const gz1=Math.min(MGZ-1,Math.floor((pz+GR-mGoz)/MCELL));
-
-        let bestD2=1e9, bestTi=-1, bNpx=0,bNpy=0,bNpz=0;
-        for (let gx=gx0;gx<=gx1;gx++) for (let gy=gy0;gy<=gy1;gy++) for (let gz=gz0;gz<=gz1;gz++) {
-          const gcell=(gx*MGY+gy)*MGZ+gz, cnt=mGCnt[gcell], base=gcell*MBCAP;
-          for (let ki=0;ki<cnt;ki++) {
-            const ti=mGDat[base+ki];
-            const tAi=meshTri[ti*3]*3, tBi=meshTri[ti*3+1]*3, tCi=meshTri[ti*3+2]*3;
-            const Tax=meshWorld[tAi],  Tay=meshWorld[tAi+1], Taz=meshWorld[tAi+2];
-            const Tbx=meshWorld[tBi],  Tby=meshWorld[tBi+1], Tbz=meshWorld[tBi+2];
-            const Tcx=meshWorld[tCi],  Tcy=meshWorld[tCi+1], Tcz=meshWorld[tCi+2];
-            // Ericson closest point on triangle
-            const ABx=Tbx-Tax,ABy=Tby-Tay,ABz=Tbz-Taz;
-            const ACx=Tcx-Tax,ACy=Tcy-Tay,ACz=Tcz-Taz;
-            const APx=px-Tax, APy=py-Tay, APz=pz-Taz;
-            const d1=ABx*APx+ABy*APy+ABz*APz, d2=ACx*APx+ACy*APy+ACz*APz;
-            let Npx,Npy,Npz;
-            if (d1<=0&&d2<=0) { Npx=Tax;Npy=Tay;Npz=Taz; }
-            else {
-              const BPx=px-Tbx,BPy=py-Tby,BPz=pz-Tbz;
-              const d3=ABx*BPx+ABy*BPy+ABz*BPz, d4=ACx*BPx+ACy*BPy+ACz*BPz;
-              if (d3>=0&&d4<=d3) { Npx=Tbx;Npy=Tby;Npz=Tbz; }
-              else {
-                const CPx=px-Tcx,CPy=py-Tcy,CPz=pz-Tcz;
-                const d5=ABx*CPx+ABy*CPy+ABz*CPz, d6=ACx*CPx+ACy*CPy+ACz*CPz;
-                if (d6>=0&&d5<=d6) { Npx=Tcx;Npy=Tcy;Npz=Tcz; }
-                else {
-                  const vc=d1*d4-d3*d2;
-                  if (vc<=0&&d1>=0&&d3<=0) {
-                    const tv=d1/(d1-d3); Npx=Tax+tv*ABx;Npy=Tay+tv*ABy;Npz=Taz+tv*ABz;
-                  } else {
-                    const vb=d5*d2-d1*d6;
-                    if (vb<=0&&d2>=0&&d6<=0) {
-                      const tw=d2/(d2-d6); Npx=Tax+tw*ACx;Npy=Tay+tw*ACy;Npz=Taz+tw*ACz;
-                    } else {
-                      const va=d3*d6-d5*d4, denom=1/(va+vb+vc);
-                      const tv=vb*denom, tw=vc*denom;
-                      Npx=Tax+tv*ABx+tw*ACx; Npy=Tay+tv*ABy+tw*ACy; Npz=Taz+tv*ABz+tw*ACz;
-                    }
-                  }
-                }
-              }
-            }
-            const ex=px-Npx,ey=py-Npy,ez=pz-Npz, d2t=ex*ex+ey*ey+ez*ez;
-            if (d2t<bestD2) { bestD2=d2t; bestTi=ti; bNpx=Npx; bNpy=Npy; bNpz=Npz; }
-          }
-        }
-
-        if (bestTi >= 0 && bestD2 < 0.0009) { // 3 cm threshold
-          const tAi=meshTri[bestTi*3]*3, tBi=meshTri[bestTi*3+1]*3, tCi=meshTri[bestTi*3+2]*3;
-          const Tax=meshWorld[tAi],Tay=meshWorld[tAi+1],Taz=meshWorld[tAi+2];
-          const Tbx=meshWorld[tBi],Tby=meshWorld[tBi+1],Tbz=meshWorld[tBi+2];
-          const Tcx=meshWorld[tCi],Tcy=meshWorld[tCi+1],Tcz=meshWorld[tCi+2];
-          const e1x=Tbx-Tax,e1y=Tby-Tay,e1z=Tbz-Taz;
-          const e2x=Tcx-Tax,e2y=Tcy-Tay,e2z=Tcz-Taz;
-          const fnx=e1y*e2z-e1z*e2y, fny=e1z*e2x-e1x*e2z, fnz=e1x*e2y-e1y*e2x;
-          const flen=Math.sqrt(fnx*fnx+fny*fny+fnz*fnz);
-          if (flen > 1e-8) {
-            const ex=px-bNpx, ey=py-bNpy, ez=pz-bNpz;
-            const sgn = ex*fnx+ey*fny+ez*fnz; // >0 = outside mesh
-            const fi = 1/flen;
-            let nx=fnx*fi, ny=fny*fi, nz=fnz*fi;
-            if (sgn < 0) { nx=-nx; ny=-ny; nz=-nz; } // inside: flip to push outward
-            const dist = Math.sqrt(bestD2);
-            const sdf = sgn < 0 ? -dist : dist;       // signed distance
-            if (sdf < 0.001) {                         // inside or within 1 mm
-              const push = 0.001 - sdf;
-              px += nx*push; py += ny*push; pz += nz*push;
-              // find nearest joint for velocity
+        // Map world (px, pz) → pixel (col, row) in the readPixels buffer
+        // depthCam rotation.x=-PI/2 → camera +Y = world -Z, camera +X = world +X
+        // readPixels row 0 = bottom of framebuffer = NDC Y=-1 = world +Z side
+        const pc = Math.floor((px - mirrorHipsX + DMAP_HALF) / (2*DMAP_HALF) * DMAP_SIZE);
+        const pr = Math.floor((mirrorHipsZ + DMAP_HALF - pz) / (2*DMAP_HALF) * DMAP_SIZE);
+        if (pc >= 0 && pc < DMAP_SIZE && pr >= 0 && pr < DMAP_SIZE) {
+          const hy = (depthPx[(pr * DMAP_SIZE + pc) * 4] / 255.0) * DMAP_YMAX;
+          if (hy > 0.05 && py < hy) {
+            py = hy;
+            if (vy < 0) {
+              // find nearest joint for velocity response
               let nj=0, njd2=1e9;
-              for (let ji=0;ji<MJ_JOINTS.length;ji++) {
-                const dx=mjPA[ji*3]-bNpx, dy=mjPA[ji*3+1]-bNpy, dz=mjPA[ji*3+2]-bNpz;
+              for (let ji=0; ji<MJ_JOINTS.length; ji++) {
+                const dx=mjPA[ji*3]-px, dy=mjPA[ji*3+1]-hy, dz=mjPA[ji*3+2]-pz;
                 const jd2=dx*dx+dy*dy+dz*dz;
                 if (jd2<njd2) { njd2=jd2; nj=ji; }
               }
-              const jvx=mjVA[nj*3], jvy=mjVA[nj*3+1], jvz=mjVA[nj*3+2];
-              const rvx=vx-jvx, rvy=vy-jvy, rvz=vz-jvz;
-              const vnr=rvx*nx+rvy*ny+rvz*nz;
-              if (vnr < 0) {
-                vx=jvx+(rvx-vnr*nx)*BODY_STICK;
-                vy=jvy+(rvy-vnr*ny)*BODY_STICK;
-                vz=jvz+(rvz-vnr*nz)*BODY_STICK;
-              }
-              age[i]=1;
+              const jvy2 = mjVA[nj*3+1];
+              vy = jvy2 + (-vy + jvy2) * RESTITUTION; // bounce off moving surface
+              vx *= BODY_STICK; vz *= BODY_STICK;
             }
+            age[i]=1;
           }
         }
       }
@@ -789,6 +683,7 @@ renderer.setAnimationLoop((ts, frame) => {
       floorRing.position.x = p.x; floorRing.position.z = 2 * MIRROR_PLANE_Z - p.z;
     }
     updateBodyCollision(frame, refSpace, dt);
+    renderDepthMap();
 
     // Right thumbstick — redo calibration
     if (xrSession) {
