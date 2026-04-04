@@ -351,6 +351,10 @@ const mj      = {}; // current-frame bone world positions
 const mj_prev = {}; // previous-frame (for velocity)
 const mjv     = {}; // per-joint velocity
 
+// Virtual T-pose calibration — captured automatically on first valid body frame
+const calibRest = {};
+let isCalibrated = false;
+
 function updateBodyCollision(frame, refSpace, dt) {
   const body = frame.body;
   if (!body || !vrm) { bodyActive = false; return; }
@@ -364,6 +368,19 @@ function updateBodyCollision(frame, refSpace, dt) {
   const hp = hipsPose.transform.position;
   vrm.scene.position.set(hp.x, hp.y - vrmNaturalHipsY, 2 * MIRROR_PLANE_Z - hp.z);
   vrm.scene.visible = true;
+
+  // Auto-calibrate on the first frame where all major joints are available
+  if (!isCalibrated) {
+    let n = 0;
+    for (const xrJoint of BONE_DRIVE_ORDER) {
+      const s = body.get(xrJoint); if (!s) continue;
+      const p = frame.getPose(s, refSpace); if (!p) continue;
+      const q = p.transform.orientation;
+      calibRest[xrJoint] = new THREE.Quaternion(q.x, q.y, q.z, q.w);
+      n++;
+    }
+    if (n >= BONE_DRIVE_ORDER.length * 0.8) isCalibrated = true;
+  }
 
   // Drive VRM bones from body tracking (relative quaternions + Y180 mirror correction)
   const pose = {};
@@ -386,12 +403,25 @@ function updateBodyCollision(frame, refSpace, dt) {
         if (pPose) {
           const pq = pPose.transform.orientation;
           const parentQuat = new THREE.Quaternion(pq.x, pq.y, pq.z, pq.w);
-          finalQuat = parentQuat.clone().invert().multiply(jointQuat);
+          if (isCalibrated && calibRest[parentXR] && calibRest[xrJoint]) {
+            finalQuat = calibRest[parentXR].clone()
+              .multiply(parentQuat.clone().invert())
+              .multiply(jointQuat)
+              .multiply(calibRest[xrJoint].clone().invert());
+          } else {
+            finalQuat = parentQuat.clone().invert().multiply(jointQuat);
+          }
           finalQuat.premultiply(_Qy180).multiply(_Qy180inv);
         }
       }
     } else {
-      finalQuat = jointQuat.clone().premultiply(_Qy180).multiply(_Qy180inv);
+      // Root bone (hips) — use world quat relative to rest pose
+      if (isCalibrated && calibRest[xrJoint]) {
+        finalQuat = jointQuat.clone().multiply(calibRest[xrJoint].clone().invert());
+      } else {
+        finalQuat = jointQuat.clone();
+      }
+      finalQuat.premultiply(_Qy180).multiply(_Qy180inv);
     }
     if (!finalQuat) continue;
     pose[boneName] = { rotation: [finalQuat.x, finalQuat.y, finalQuat.z, finalQuat.w] };

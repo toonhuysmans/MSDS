@@ -190,7 +190,6 @@ const HAND_CAL_JOINTS = [
 // Calibration state
 const calibRest = {};   // joint → THREE.Quaternion sampled at T-pose
 let isCalibrated = false;
-let calibCountdownEnd = 0;   // performance.now() timestamp when sampling fires; 0 = idle
 let thumbstickWasPressed = false;
 
 // XR body joint hierarchy — derived from VRMHumanBoneParentMap so it stays
@@ -647,17 +646,12 @@ function drawHUD() {
 
   // Calibration status row
   ctx.font = '13px monospace';
-  const remaining = calibCountdownEnd > 0
-    ? Math.ceil((calibCountdownEnd - performance.now()) / 1000) : 0;
-  if (remaining > 0) {
-    ctx.fillStyle = '#ffdd00';
-    ctx.fillText(`Arms OUT, fingers open — calibrating in ${remaining}…`, 256, 44);
-  } else if (isCalibrated) {
+  if (isCalibrated) {
     ctx.fillStyle = '#44ff88';
-    ctx.fillText('T-pose calibrated ✓  (R-stick to redo)', 256, 44);
+    ctx.fillText('Auto-calibrated ✓  (R-stick to redo)', 256, 44);
   } else {
     ctx.fillStyle = '#ffaa44';
-    ctx.fillText('Spread arms & fingers → press R THUMBSTICK', 256, 44);
+    ctx.fillText('Waiting for body tracking…', 256, 44);
   }
 
   // Recording status
@@ -753,7 +747,9 @@ renderer.setAnimationLoop((timestamp, frame) => {
   if (frame && renderer.xr.isPresenting) {
     refSpace = renderer.xr.getReferenceSpace();
 
-    // Input: right thumbstick = calibrate, left thumbstick = record (controllers only)
+    const inputSrcs = xrSession ? xrSession.inputSources : [];
+
+    // Input: right thumbstick = redo calibration instantly, left thumbstick = record
     if (xrSession) {
       usingHandTracking = false;
       for (const src of xrSession.inputSources) {
@@ -762,9 +758,9 @@ renderer.setAnimationLoop((timestamp, frame) => {
         if (src.handedness === 'right') {
           debugBtnsR = src.gamepad.buttons.map(b => b.pressed);
           const pressed = src.gamepad.buttons[3]?.pressed ?? false;
-          if (pressed && !thumbstickWasPressed && calibCountdownEnd === 0) {
-            calibCountdownEnd = performance.now() + 3000;
+          if (pressed && !thumbstickWasPressed && frame.body) {
             isCalibrated = false;
+            captureTPose(frame.body, frame, refSpace, inputSrcs);
           }
           thumbstickWasPressed = pressed;
         } else if (src.handedness === 'left') {
@@ -776,13 +772,8 @@ renderer.setAnimationLoop((timestamp, frame) => {
       }
     }
 
-    const inputSrcs = xrSession ? xrSession.inputSources : [];
-
-    // Fire calibration when countdown expires
-    if (calibCountdownEnd > 0 && performance.now() >= calibCountdownEnd) {
-      calibCountdownEnd = 0;
-      if (frame.body) captureTPose(frame.body, frame, refSpace, inputSrcs);
-    }
+    // Auto-calibrate on the first frame where body tracking is valid
+    if (!isCalibrated && frame.body) captureTPose(frame.body, frame, refSpace, inputSrcs);
 
     updateVRMFromBody(frame, refSpace, inputSrcs);
 
