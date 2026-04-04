@@ -223,40 +223,60 @@ function updateArmature() {
 }
 
 // ============================================================
-// Collision capsule buffer  [ax ay az bx by bz r r²] × MAX_CAPS
+// Collision capsule buffer  [ax ay az bx by bz r r² jvx jvy jvz] × MAX_CAPS
 // ============================================================
-const MAX_CAPS = 16;
-const capBuf = new Float32Array(MAX_CAPS * 8);
+const MAX_CAPS  = 16;
+const CAP_STRIDE = 11;
+const capBuf = new Float32Array(MAX_CAPS * CAP_STRIDE);
 let numCaps = 0;
 
 let headX = 0, headY = 1.7, headZ = 2 * MIRROR_PLANE_Z;
-let mirrorHipsX = 0, mirrorHipsZ = 2 * MIRROR_PLANE_Z; // for particle AABB culling
+let headVX = 0, headVY = 0, headVZ = 0; // mirrored head velocity
+let mirrorHipsX = 0, mirrorHipsZ = 2 * MIRROR_PLANE_Z;
 const HEAD_R  = 0.14;
 const HEAD_R2 = HEAD_R * HEAD_R;
 let bodyActive = false;
 
-function setCap(j, ax, ay, az, bx, by, bz, r) {
-  const o = j * 8;
-  capBuf[o]=ax; capBuf[o+1]=ay; capBuf[o+2]=az;
+function setCap(j, ax, ay, az, bx, by, bz, r, jvx, jvy, jvz) {
+  const o = j * CAP_STRIDE;
+  capBuf[o]=ax;  capBuf[o+1]=ay;  capBuf[o+2]=az;
   capBuf[o+3]=bx; capBuf[o+4]=by; capBuf[o+5]=bz;
   capBuf[o+6]=r;  capBuf[o+7]=r*r;
+  capBuf[o+8]=jvx; capBuf[o+9]=jvy; capBuf[o+10]=jvz;
 }
 
 // ============================================================
 // Update capsule positions from body tracking
 // ============================================================
-const jp = {}; // real joint position cache
-const mj = {}; // mirrored joint position cache
+const jp      = {}; // real joint position cache
+const jp_prev = {}; // previous-frame real joint positions
+const mj      = {}; // mirrored joint position cache
+const mjv     = {}; // mirrored joint velocity cache
 
-function mirrorJoint(name) {
+function mirrorJoint(name, dt) {
   if (!jp[name]) return;
-  if (!mj[name]) mj[name] = { x:0, y:0, z:0 };
-  mj[name].x = jp[name].x;                          // same X (left hand stays left)
-  mj[name].y = jp[name].y;                          // same Y
-  mj[name].z = 2 * MIRROR_PLANE_Z - jp[name].z;     // Z-reflected through mirror plane
+  if (!mj[name])  mj[name]  = { x:0, y:0, z:0 };
+  if (!mjv[name]) mjv[name] = { x:0, y:0, z:0 };
+  mj[name].x = jp[name].x;
+  mj[name].y = jp[name].y;
+  mj[name].z = 2 * MIRROR_PLANE_Z - jp[name].z;
+  // velocity: X/Y unchanged, Z negated (mirror flips Z axis)
+  if (jp_prev[name]) {
+    const s = Math.min(1 / dt, 10); // clamp velocity to 10 m/s to suppress tracking noise
+    const rvx = (jp[name].x - jp_prev[name].x) * s;
+    const rvy = (jp[name].y - jp_prev[name].y) * s;
+    const rvz = (jp[name].z - jp_prev[name].z) * s;
+    mjv[name].x = rvx; mjv[name].y = rvy; mjv[name].z = -rvz;
+  } else {
+    mjv[name].x = 0; mjv[name].y = 0; mjv[name].z = 0;
+  }
+  if (!jp_prev[name]) jp_prev[name] = { x:0, y:0, z:0 };
+  jp_prev[name].x = jp[name].x;
+  jp_prev[name].y = jp[name].y;
+  jp_prev[name].z = jp[name].z;
 }
 
-function updateBodyCollision(frame, refSpace) {
+function updateBodyCollision(frame, refSpace, dt) {
   const body = frame.body;
   if (!body) { bodyActive = false; return; }
 
@@ -269,25 +289,31 @@ function updateBodyCollision(frame, refSpace) {
     }
   }
 
-  // Compute mirrored skeleton
-  for (const name of Object.keys(jp)) mirrorJoint(name);
+  // Compute mirrored skeleton + velocities
+  for (const name of Object.keys(jp)) mirrorJoint(name, dt);
 
   // Track mirror hips for culling
   if (mj['hips']) { mirrorHipsX = mj['hips'].x; mirrorHipsZ = mj['hips'].z; }
 
-  // Build capsules from mirrored positions
+  // Build capsules with average endpoint velocity
   numCaps = 0;
   for (const [a, b, r] of COLL_SEGS) {
     if (mj[a] && mj[b]) {
-      setCap(numCaps++, mj[a].x, mj[a].y, mj[a].z, mj[b].x, mj[b].y, mj[b].z, r);
+      const va = mjv[a] || mjv[a]; // always exists after mirrorJoint
+      const vb = mjv[b] || mjv[a];
+      const avx = (va.x + vb.x) * 0.5;
+      const avy = (va.y + vb.y) * 0.5;
+      const avz = (va.z + vb.z) * 0.5;
+      setCap(numCaps++, mj[a].x, mj[a].y, mj[a].z, mj[b].x, mj[b].y, mj[b].z, r, avx, avy, avz);
     }
   }
 
   // Mirror head
   if (mj['head']) {
     headX = mj['head'].x; headY = mj['head'].y + 0.04; headZ = mj['head'].z;
+    if (mjv['head']) { headVX = mjv['head'].x; headVY = mjv['head'].y; headVZ = mjv['head'].z; }
     spawnX = mj['head'].x;
-    spawnY = mj['head'].y + 2.5;  // well above head so ash spreads before hitting
+    spawnY = mj['head'].y + 2.5;
     spawnZ = mj['head'].z;
     floorRing.position.x = spawnX;
     floorRing.position.z = spawnZ;
@@ -362,10 +388,11 @@ function updateParticles(dt) {
 
         // Capsule checks
         for (let j = 0; j < nc && !hit; j++) {
-          const o = j * 8;
+          const o = j * CAP_STRIDE;
           const ax=capBuf[o],   ay=capBuf[o+1], az=capBuf[o+2];
           const bx=capBuf[o+3], by=capBuf[o+4], bz=capBuf[o+5];
           const r=capBuf[o+6],  r2=capBuf[o+7];
+          const jvx=capBuf[o+8], jvy=capBuf[o+9], jvz=capBuf[o+10];
           const abx=bx-ax, aby=by-ay, abz=bz-az;
           const ab2 = abx*abx + aby*aby + abz*abz;
           let t = ab2 > 1e-8 ? ((px-ax)*abx+(py-ay)*aby+(pz-az)*abz)/ab2 : 0;
@@ -377,13 +404,14 @@ function updateParticles(dt) {
             const inv = 1/Math.sqrt(d2);
             const nx=ex*inv, ny=ey*inv, nz=ez*inv;
             px=qx+nx*r; py=qy+ny*r; pz=qz+nz*r;
-            // Ash sticks: kill normal velocity, heavily damp tangential
-            const vn=vx*nx+vy*ny+vz*nz;
-            if (vn < 0) {
-              // Remove normal component entirely (no bounce), retain tiny tangential slide
-              vx = (vx - vn*nx) * BODY_STICK;
-              vy = (vy - vn*ny) * BODY_STICK;
-              vz = (vz - vn*nz) * BODY_STICK;
+            // Moving-surface model: work in joint's reference frame
+            // Slow joint → ash sticks; fast joint → ash flung outward
+            const rvx=vx-jvx, rvy=vy-jvy, rvz=vz-jvz;
+            const vn_rel = rvx*nx + rvy*ny + rvz*nz;
+            if (vn_rel < 0) {
+              vx = jvx + (rvx - vn_rel*nx) * BODY_STICK;
+              vy = jvy + (rvy - vn_rel*ny) * BODY_STICK;
+              vz = jvz + (rvz - vn_rel*nz) * BODY_STICK;
             }
             age[i] = 1;
             hit = true;
@@ -398,11 +426,12 @@ function updateParticles(dt) {
             const inv = 1/Math.sqrt(hd2);
             const nx=hx*inv, ny=hy*inv, nz=hz*inv;
             px=headX+nx*HEAD_R; py=headY+ny*HEAD_R; pz=headZ+nz*HEAD_R;
-            const vn=vx*nx+vy*ny+vz*nz;
-            if (vn < 0) {
-              vx = (vx - vn*nx) * BODY_STICK;
-              vy = (vy - vn*ny) * BODY_STICK;
-              vz = (vz - vn*nz) * BODY_STICK;
+            const rvx=vx-headVX, rvy=vy-headVY, rvz=vz-headVZ;
+            const vn_rel = rvx*nx + rvy*ny + rvz*nz;
+            if (vn_rel < 0) {
+              vx = headVX + (rvx - vn_rel*nx) * BODY_STICK;
+              vy = headVY + (rvy - vn_rel*ny) * BODY_STICK;
+              vz = headVZ + (rvz - vn_rel*nz) * BODY_STICK;
             }
             age[i] = 1;
           }
@@ -501,7 +530,7 @@ renderer.setAnimationLoop((ts, frame) => {
       spawnX = p.x; spawnY = p.y + 2.5; spawnZ = 2 * MIRROR_PLANE_Z - p.z;
       floorRing.position.x = p.x; floorRing.position.z = 2 * MIRROR_PLANE_Z - p.z;
     }
-    updateBodyCollision(frame, refSpace);
+    updateBodyCollision(frame, refSpace, dt);
     drawHUD(bodyActive);
   }
 
