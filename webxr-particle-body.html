@@ -186,15 +186,26 @@ scene.add(points);
 // Body segments to collide against [jointA, jointB, radius]
 // ============================================================
 const COLL_SEGS = [
-  ['hips',             'spine-middle',      0.20],
-  ['spine-middle',     'chest',             0.18],
-  ['chest',            'neck',              0.09],
+  // Spine
+  ['hips',             'spine-middle',      0.16],
+  ['spine-middle',     'chest',             0.15],
+  ['chest',            'neck',              0.10],
+  // Shoulder girdle — crossbar gives torso width
+  ['left-shoulder',    'right-shoulder',    0.13],
+  ['chest',            'left-shoulder',     0.12],
+  ['chest',            'right-shoulder',    0.12],
+  // Arms
   ['left-shoulder',    'left-arm-upper',    0.08],
   ['left-arm-upper',   'left-arm-lower',    0.07],
   ['left-arm-lower',   'left-hand-wrist',   0.055],
   ['right-shoulder',   'right-arm-upper',   0.08],
   ['right-arm-upper',  'right-arm-lower',   0.07],
   ['right-arm-lower',  'right-hand-wrist',  0.055],
+  // Pelvis — crossbar fills hip width
+  ['left-upper-leg',   'right-upper-leg',   0.13],
+  ['hips',             'left-upper-leg',    0.11],
+  ['hips',             'right-upper-leg',   0.11],
+  // Legs
   ['left-upper-leg',   'left-lower-leg',    0.09],
   ['left-lower-leg',   'left-foot-ankle',   0.07],
   ['right-upper-leg',  'right-lower-leg',   0.09],
@@ -243,7 +254,7 @@ function updateArmature() {
 // ============================================================
 // Collision capsule buffer  [ax ay az bx by bz r r² jvx jvy jvz] × MAX_CAPS
 // ============================================================
-const MAX_CAPS  = 16;
+const MAX_CAPS  = 24;
 const CAP_STRIDE = 11;
 const capBuf = new Float32Array(MAX_CAPS * CAP_STRIDE);
 let numCaps = 0;
