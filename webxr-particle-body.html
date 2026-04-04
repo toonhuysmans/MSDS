@@ -252,10 +252,9 @@ const mat = new THREE.ShaderMaterial({
       uv.y = (hmCenter.y + hmHalf - pos.z) / (2.0 * hmHalf);
       if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
         float surfY = texture2D(heightMap, uv).r * hmYMax;
-        // Only snap if particle is within 8 cm below the top surface — avoids
-        // pulling mid-air or side-surface particles up to the wrong height.
-        float diff = surfY - pos.y;
-        if (diff > 0.0 && diff < 0.08) pos.y = surfY;
+        // Snap any particle below the surface up to it.
+        // Particles still above (falling) are unaffected: max(falling_y, surfY) = falling_y.
+        if (surfY > 0.05) pos.y = max(pos.y, surfY);
       }
       vec4 mv = modelViewMatrix * vec4(pos, 1.0);
       gl_PointSize = pointSize * aSize / -mv.z;
