@@ -428,6 +428,7 @@ function updateBodyCollision(frame, refSpace, dt) {
   }
 
   vrm.humanoid.setNormalizedPose(pose);
+  vrm.update(dt);               // apply twist constraints + spring bones first
   vrm.scene.updateMatrixWorld(true);
 
   // Extract VRM bone world positions → mj[] and compute velocities → mjv[]
@@ -661,13 +662,17 @@ if (navigator.xr) {
   enterBtn.textContent = 'WebXR Not Available';
 }
 
+let xrSession = null;
+let thumbstickWasPressed = false;
+
 enterBtn.addEventListener('click', async () => {
   try {
     const session = await navigator.xr.requestSession('immersive-vr', {
       optionalFeatures: ['body-tracking', 'local-floor', 'bounded-floor']
     });
+    xrSession = session;
     renderer.xr.setSession(session);
-    session.addEventListener('end', () => { enterBtn.textContent = 'Enter VR'; });
+    session.addEventListener('end', () => { xrSession = null; enterBtn.textContent = 'Enter VR'; });
     enterBtn.textContent = 'In VR';
   } catch(e) { console.error(e); }
 });
@@ -696,11 +701,21 @@ renderer.setAnimationLoop((ts, frame) => {
       floorRing.position.x = p.x; floorRing.position.z = 2 * MIRROR_PLANE_Z - p.z;
     }
     updateBodyCollision(frame, refSpace, dt);
+
+    // Right thumbstick — redo calibration
+    if (xrSession) {
+      for (const src of xrSession.inputSources) {
+        if (!src.gamepad || src.handedness !== 'right') continue;
+        const pressed = src.gamepad.buttons[3]?.pressed ?? false;
+        if (pressed && !thumbstickWasPressed) isCalibrated = false;
+        thumbstickWasPressed = pressed;
+      }
+    }
+
     drawHUD(bodyActive);
   }
 
   mat.uniforms.time.value = ts / 1000;
-  if (vrm) vrm.update(dt);
   updateParticles(dt);
   renderer.render(scene, camera);
 });
