@@ -49,7 +49,6 @@ const SPAWN_R     = 2.0;     // rain radius around body centre (m)
 const SPAWN_Y     = 4.5;     // rain spawn height (m above floor)
 const CULL_R2         = 1.6*1.6; // collision zone (XZ distance² from mirror hips)
 const MIRROR_PLANE_Z  = -1.5;    // world-Z of the mirror surface (halfway between user and image)
-const K_BLEND         =  0.10;   // smooth-min blend radius (m) — merges capsule boundaries into one surface
 
 // ============================================================
 // Pre-computed respawn table — avoids Math.random/cos in the hot loop
@@ -179,7 +178,7 @@ const XR_PARENT = {
   'right-foot-ankle':'right-lower-leg',
 };
 
-// COLL_SEGS joint name → VRM bone (for world-position extraction)
+// Joint name → VRM bone (for world-position extraction)
 const VRM_BONE_FOR_JOINT = {
   'hips':             VRMHumanBoneName.Hips,
   'spine-middle':     VRMHumanBoneName.Chest,
@@ -224,6 +223,7 @@ vrmLoader.load(VRM_URL, (gltf) => {
   vrmNaturalHipsY = _tv.y;
   vrm.scene.visible = false;
   scene.add(vrm.scene);
+  setupMeshCollision(vrm);
 }, undefined, (e) => console.error('VRM load error:', e));
 
 // ============================================================
@@ -292,57 +292,34 @@ points.frustumCulled = false;
 scene.add(points);
 
 // ============================================================
-// Body segments to collide against [jointA, jointB, radius]
+// Mesh collision — CPU skinning + grid hash each frame
 // ============================================================
-const COLL_SEGS = [
-  // Spine
-  ['hips',             'spine-middle',      0.12],
-  ['spine-middle',     'chest',             0.13],
-  ['chest',            'neck',              0.07],
-  // Shoulder girdle
-  ['left-shoulder',    'right-shoulder',    0.08],
-  ['chest',            'left-shoulder',     0.10],
-  ['chest',            'right-shoulder',    0.10],
-  // Arms
-  ['left-shoulder',    'left-arm-upper',    0.06],
-  ['left-arm-upper',   'left-arm-lower',    0.055],
-  ['left-arm-lower',   'left-hand-wrist',   0.04],
-  ['right-shoulder',   'right-arm-upper',   0.06],
-  ['right-arm-upper',  'right-arm-lower',   0.055],
-  ['right-arm-lower',  'right-hand-wrist',  0.04],
-  // Pelvis
-  ['left-upper-leg',   'right-upper-leg',   0.10],
-  ['hips',             'left-upper-leg',    0.09],
-  ['hips',             'right-upper-leg',   0.09],
-  // Legs
-  ['left-upper-leg',   'left-lower-leg',    0.10],
-  ['left-lower-leg',   'left-foot-ankle',   0.06],
-  ['right-upper-leg',  'right-lower-leg',   0.10],
-  ['right-lower-leg',  'right-foot-ankle',  0.06],
-];
+let meshSkel = null;
+let meshBindV = null;   // bind-space vertices (pre-multiplied by bindMatrixInverse per mesh)
+let meshSkinI = null;   // Uint16Array: skinIndex (4 per vertex)
+let meshSkinW = null;   // Float32Array: skinWeight (4 per vertex)
+let meshTri   = null;   // Uint32Array: triangle indices
+let meshWorld = null;   // Float32Array: world-space vertices this frame
+let meshNV = 0, meshNT = 0;
 
-// ============================================================
-// Collision capsule buffer  [ax ay az bx by bz r r² jvx jvy jvz] × MAX_CAPS
-// ============================================================
-const MAX_CAPS  = 24;
-const CAP_STRIDE = 11;
-const capBuf = new Float32Array(MAX_CAPS * CAP_STRIDE);
-let numCaps = 0;
+const MCELL = 0.10;                      // grid cell size (10 cm)
+const MGX = 24, MGY = 32, MGZ = 16;     // grid dimensions
+const MBCAP = 48;                        // max triangles per cell
+const mGCnt = new Int16Array(MGX * MGY * MGZ);
+const mGDat = new Uint32Array(MGX * MGY * MGZ * MBCAP);
+let mGox = 0, mGoy = -0.1, mGoz = 0;   // grid world origin
 
-let headX = 0, headY = 1.7, headZ = 2 * MIRROR_PLANE_Z;
-let headVX = 0, headVY = 0, headVZ = 0; // mirrored head velocity
+// Joints used for velocity lookup (nearest joint to collision point)
+const MJ_JOINTS = ['hips','spine-middle','chest','neck',
+  'left-shoulder','left-arm-upper','left-arm-lower','left-hand-wrist',
+  'right-shoulder','right-arm-upper','right-arm-lower','right-hand-wrist',
+  'left-upper-leg','left-lower-leg','left-foot-ankle',
+  'right-upper-leg','right-lower-leg','right-foot-ankle'];
+const mjPA = new Float32Array(MJ_JOINTS.length * 3); // joint world positions (flat)
+const mjVA = new Float32Array(MJ_JOINTS.length * 3); // joint velocities (flat)
+
 let mirrorHipsX = 0, mirrorHipsZ = 2 * MIRROR_PLANE_Z;
-const HEAD_R  = 0.09;
-const HEAD_R2 = HEAD_R * HEAD_R;
 let bodyActive = false;
-
-function setCap(j, ax, ay, az, bx, by, bz, r, jvx, jvy, jvz) {
-  const o = j * CAP_STRIDE;
-  capBuf[o]=ax;  capBuf[o+1]=ay;  capBuf[o+2]=az;
-  capBuf[o+3]=bx; capBuf[o+4]=by; capBuf[o+5]=bz;
-  capBuf[o+6]=r;  capBuf[o+7]=r*r;
-  capBuf[o+8]=jvx; capBuf[o+9]=jvy; capBuf[o+10]=jvz;
-}
 
 // ============================================================
 // Joint position / velocity caches (populated from VRM bone world positions)
@@ -354,6 +331,84 @@ const mjv     = {}; // per-joint velocity
 // Virtual T-pose calibration — captured automatically on first valid body frame
 const calibRest = {};
 let isCalibrated = false;
+
+// --- Mesh collision setup (called once after VRM loads) ---
+function setupMeshCollision(vrmRef) {
+  const bv = new THREE.Vector3();
+  const allPos=[], allSI=[], allSW=[], allIdx=[];
+  let vOff = 0;
+  vrmRef.scene.traverse(obj => {
+    if (!obj.isSkinnedMesh) return;
+    if (!meshSkel) meshSkel = obj.skeleton;
+    const geo = obj.geometry;
+    const pos = geo.attributes.position.array;
+    const si  = geo.attributes.skinIndex.array;
+    const sw  = geo.attributes.skinWeight.array;
+    const nv  = pos.length / 3;
+    const bmi = obj.bindMatrixInverse;
+    for (let i = 0; i < nv; i++) {
+      bv.set(pos[i*3], pos[i*3+1], pos[i*3+2]);
+      bv.applyMatrix4(bmi);
+      allPos.push(bv.x, bv.y, bv.z);
+      allSI.push(si[i*4]||0, si[i*4+1]||0, si[i*4+2]||0, si[i*4+3]||0);
+      allSW.push(sw[i*4]||0, sw[i*4+1]||0, sw[i*4+2]||0, sw[i*4+3]||0);
+    }
+    if (geo.index) {
+      for (const idx of geo.index.array) allIdx.push(idx + vOff);
+    } else {
+      for (let i = 0; i < nv; i++) allIdx.push(i + vOff);
+    }
+    vOff += nv;
+  });
+  meshNV = vOff; meshNT = allIdx.length / 3;
+  meshBindV = new Float32Array(allPos);
+  meshSkinI = new Uint16Array(allSI);
+  meshSkinW = new Float32Array(allSW);
+  meshTri   = new Uint32Array(allIdx);
+  meshWorld = new Float32Array(meshNV * 3);
+  console.log(`Mesh collision: ${meshNV} verts, ${meshNT} tris`);
+}
+
+// --- Per-frame CPU skinning ---
+function skinMesh() {
+  meshSkel.update();
+  const bm = meshSkel.boneMatrices;
+  for (let i = 0; i < meshNV; i++) {
+    const ix = i*3, si4 = i*4;
+    const lx = meshBindV[ix], ly = meshBindV[ix+1], lz = meshBindV[ix+2];
+    let fx=0, fy=0, fz=0;
+    for (let j = 0; j < 4; j++) {
+      const w = meshSkinW[si4+j]; if (w <= 0) continue;
+      const m = meshSkinI[si4+j] * 16;
+      fx += w*(bm[m]*lx + bm[m+4]*ly + bm[m+8]*lz  + bm[m+12]);
+      fy += w*(bm[m+1]*lx + bm[m+5]*ly + bm[m+9]*lz  + bm[m+13]);
+      fz += w*(bm[m+2]*lx + bm[m+6]*ly + bm[m+10]*lz + bm[m+14]);
+    }
+    meshWorld[ix]=fx; meshWorld[ix+1]=fy; meshWorld[ix+2]=fz;
+  }
+}
+
+// --- Per-frame spatial grid rebuild ---
+function buildMeshGrid() {
+  mGox = mirrorHipsX - MGX*MCELL*0.5;
+  mGoy = -0.1;
+  mGoz = mirrorHipsZ - MGZ*MCELL*0.5;
+  mGCnt.fill(0);
+  const v = meshWorld, t = meshTri;
+  for (let i = 0; i < meshNT; i++) {
+    const ai=t[i*3]*3, bi=t[i*3+1]*3, ci=t[i*3+2]*3;
+    const x0=Math.max(0,   Math.floor((Math.min(v[ai],  v[bi],  v[ci])  - mGox)/MCELL));
+    const x1=Math.min(MGX-1,Math.floor((Math.max(v[ai],  v[bi],  v[ci])  - mGox)/MCELL));
+    const y0=Math.max(0,   Math.floor((Math.min(v[ai+1],v[bi+1],v[ci+1])- mGoy)/MCELL));
+    const y1=Math.min(MGY-1,Math.floor((Math.max(v[ai+1],v[bi+1],v[ci+1])- mGoy)/MCELL));
+    const z0=Math.max(0,   Math.floor((Math.min(v[ai+2],v[bi+2],v[ci+2])- mGoz)/MCELL));
+    const z1=Math.min(MGZ-1,Math.floor((Math.max(v[ai+2],v[bi+2],v[ci+2])- mGoz)/MCELL));
+    for (let gx=x0;gx<=x1;gx++) for (let gy=y0;gy<=y1;gy++) for (let gz=z0;gz<=z1;gz++) {
+      const gcell=(gx*MGY+gy)*MGZ+gz, cnt=mGCnt[gcell];
+      if (cnt < MBCAP) { mGDat[gcell*MBCAP+cnt]=i; mGCnt[gcell]=cnt+1; }
+    }
+  }
+}
 
 function updateBodyCollision(frame, refSpace, dt) {
   const body = frame.body;
@@ -449,25 +504,25 @@ function updateBodyCollision(frame, refSpace, dt) {
     mj[jointName].x = px;      mj[jointName].y = py;      mj[jointName].z = pz;
   }
 
-  // Track mirror hips for particle culling zone
+  // Track mirror hips for particle culling zone and grid centering
   if (mj['hips']) { mirrorHipsX = mj['hips'].x; mirrorHipsZ = mj['hips'].z; }
 
-  // Build collision capsule buffer from VRM bone positions
-  numCaps = 0;
-  for (const [a, b, r] of COLL_SEGS) {
-    if (mj[a] && mj[b]) {
-      const va = mjv[a], vb = mjv[b];
-      setCap(numCaps++,
-        mj[a].x, mj[a].y, mj[a].z,
-        mj[b].x, mj[b].y, mj[b].z, r,
-        (va.x + vb.x) * 0.5, (va.y + vb.y) * 0.5, (va.z + vb.z) * 0.5);
-    }
+  // CPU-skin the VRM mesh and rebuild grid for this frame
+  if (meshSkel) {
+    skinMesh();
+    buildMeshGrid();
+  }
+
+  // Fill flat joint position/velocity arrays for nearest-joint velocity lookup
+  for (let ji = 0; ji < MJ_JOINTS.length; ji++) {
+    const jn = MJ_JOINTS[ji];
+    const p = mj[jn], v = mjv[jn];
+    if (p) { mjPA[ji*3]=p.x; mjPA[ji*3+1]=p.y; mjPA[ji*3+2]=p.z; }
+    if (v) { mjVA[ji*3]=v.x; mjVA[ji*3+1]=v.y; mjVA[ji*3+2]=v.z; }
   }
 
   // Spawn point above VRM head
   if (mj['head']) {
-    headX = mj['head'].x; headY = mj['head'].y + 0.04; headZ = mj['head'].z;
-    if (mjv['head']) { headVX = mjv['head'].x; headVY = mjv['head'].y; headVZ = mjv['head'].z; }
     spawnX = mj['head'].x;
     spawnY = mj['head'].y + 2.5;
     spawnZ = mj['head'].z;
@@ -475,7 +530,7 @@ function updateBodyCollision(frame, refSpace, dt) {
     floorRing.position.z = spawnZ;
   }
 
-  bodyActive = numCaps > 0;
+  bodyActive = meshSkel !== null;
 }
 
 // ============================================================
@@ -487,7 +542,6 @@ function updateParticles(dt) {
   const decay  = dt * 5.0;
   const cx = spawnX, cy = spawnY, cz = spawnZ;
   const chx = mirrorHipsX, chz = mirrorHipsZ; // cull centre at mirror hips
-  const nc = numCaps;
   const active = bodyActive;
 
   for (let i = 0; i < N; i++) {
@@ -539,67 +593,101 @@ function updateParticles(dt) {
       }
     }
 
-    // Smooth SDF body collision — all capsules blended into one organic surface
+    // Mesh SDF body collision — closest-point-on-triangle + spatial grid
     if (active) {
       const ddx = px-chx, ddz = pz-chz;
-      if (ddx*ddx + ddz*ddz < CULL_R2 && py > 0 && py < 2.7) {
-        // Accumulate smooth-min SDF + blended gradient + blended joint velocity
-        // Using Inigo Quilez polynomial smooth-min: smin(a,b,k)
-        //   h = clamp(0.5 + 0.5*(b-a)/k, 0, 1)
-        //   result = mix(b, a, h) - k*h*(1-h)
-        //   gradient weight for a = h, for b = 1-h
-        let sd = 1e9;
-        let gnx=0, gny=0, gnz=0;
-        let jvbx=0, jvby=0, jvbz=0;
+      if (ddx*ddx + ddz*ddz < CULL_R2 && py > -0.1 && py < 2.7) {
+        const GR = MCELL; // search radius (one grid cell = 10 cm)
+        const gx0=Math.max(0,    Math.floor((px-GR-mGox)/MCELL));
+        const gx1=Math.min(MGX-1,Math.floor((px+GR-mGox)/MCELL));
+        const gy0=Math.max(0,    Math.floor((py-GR-mGoy)/MCELL));
+        const gy1=Math.min(MGY-1,Math.floor((py+GR-mGoy)/MCELL));
+        const gz0=Math.max(0,    Math.floor((pz-GR-mGoz)/MCELL));
+        const gz1=Math.min(MGZ-1,Math.floor((pz+GR-mGoz)/MCELL));
 
-        for (let j = 0; j < nc; j++) {
-          const o = j * CAP_STRIDE;
-          const ax=capBuf[o],   ay=capBuf[o+1], az=capBuf[o+2];
-          const bx=capBuf[o+3], by=capBuf[o+4], bz=capBuf[o+5];
-          const r=capBuf[o+6];
-          const jvx=capBuf[o+8], jvy=capBuf[o+9], jvz=capBuf[o+10];
-          const abx=bx-ax, aby=by-ay, abz=bz-az;
-          const ab2=abx*abx+aby*aby+abz*abz;
-          let t=ab2>1e-8?((px-ax)*abx+(py-ay)*aby+(pz-az)*abz)/ab2:0;
-          if(t<0)t=0; else if(t>1)t=1;
-          const qx=ax+t*abx, qy=ay+t*aby, qz=az+t*abz;
-          const ex=px-qx, ey=py-qy, ez=pz-qz;
-          const dist=Math.sqrt(ex*ex+ey*ey+ez*ez);
-          const capsdf=dist-r;
-          const dinv=dist>1e-8?1/dist:0;
-          const cnx=ex*dinv, cny=ey*dinv, cnz=ez*dinv;
-          // Smooth-min: sd is 'a', capsdf is 'b'
-          const bh=Math.min(1,Math.max(0, 0.5+0.5*(capsdf-sd)/K_BLEND));
-          const sm=K_BLEND*bh*(1-bh);
-          gnx=gnx*bh+cnx*(1-bh); gny=gny*bh+cny*(1-bh); gnz=gnz*bh+cnz*(1-bh);
-          jvbx=jvbx*bh+jvx*(1-bh); jvby=jvby*bh+jvy*(1-bh); jvbz=jvbz*bh+jvz*(1-bh);
-          sd=bh*sd+(1-bh)*capsdf-sm;
+        let bestD2=1e9, bestTi=-1, bNpx=0,bNpy=0,bNpz=0;
+        for (let gx=gx0;gx<=gx1;gx++) for (let gy=gy0;gy<=gy1;gy++) for (let gz=gz0;gz<=gz1;gz++) {
+          const gcell=(gx*MGY+gy)*MGZ+gz, cnt=mGCnt[gcell], base=gcell*MBCAP;
+          for (let ki=0;ki<cnt;ki++) {
+            const ti=mGDat[base+ki];
+            const tAi=meshTri[ti*3]*3, tBi=meshTri[ti*3+1]*3, tCi=meshTri[ti*3+2]*3;
+            const Tax=meshWorld[tAi],  Tay=meshWorld[tAi+1], Taz=meshWorld[tAi+2];
+            const Tbx=meshWorld[tBi],  Tby=meshWorld[tBi+1], Tbz=meshWorld[tBi+2];
+            const Tcx=meshWorld[tCi],  Tcy=meshWorld[tCi+1], Tcz=meshWorld[tCi+2];
+            // Ericson closest point on triangle
+            const ABx=Tbx-Tax,ABy=Tby-Tay,ABz=Tbz-Taz;
+            const ACx=Tcx-Tax,ACy=Tcy-Tay,ACz=Tcz-Taz;
+            const APx=px-Tax, APy=py-Tay, APz=pz-Taz;
+            const d1=ABx*APx+ABy*APy+ABz*APz, d2=ACx*APx+ACy*APy+ACz*APz;
+            let Npx,Npy,Npz;
+            if (d1<=0&&d2<=0) { Npx=Tax;Npy=Tay;Npz=Taz; }
+            else {
+              const BPx=px-Tbx,BPy=py-Tby,BPz=pz-Tbz;
+              const d3=ABx*BPx+ABy*BPy+ABz*BPz, d4=ACx*BPx+ACy*BPy+ACz*BPz;
+              if (d3>=0&&d4<=d3) { Npx=Tbx;Npy=Tby;Npz=Tbz; }
+              else {
+                const CPx=px-Tcx,CPy=py-Tcy,CPz=pz-Tcz;
+                const d5=ABx*CPx+ABy*CPy+ABz*CPz, d6=ACx*CPx+ACy*CPy+ACz*CPz;
+                if (d6>=0&&d5<=d6) { Npx=Tcx;Npy=Tcy;Npz=Tcz; }
+                else {
+                  const vc=d1*d4-d3*d2;
+                  if (vc<=0&&d1>=0&&d3<=0) {
+                    const tv=d1/(d1-d3); Npx=Tax+tv*ABx;Npy=Tay+tv*ABy;Npz=Taz+tv*ABz;
+                  } else {
+                    const vb=d5*d2-d1*d6;
+                    if (vb<=0&&d2>=0&&d6<=0) {
+                      const tw=d2/(d2-d6); Npx=Tax+tw*ACx;Npy=Tay+tw*ACy;Npz=Taz+tw*ACz;
+                    } else {
+                      const va=d3*d6-d5*d4, denom=1/(va+vb+vc);
+                      const tv=vb*denom, tw=vc*denom;
+                      Npx=Tax+tv*ABx+tw*ACx; Npy=Tay+tv*ABy+tw*ACy; Npz=Taz+tv*ABz+tw*ACz;
+                    }
+                  }
+                }
+              }
+            }
+            const ex=px-Npx,ey=py-Npy,ez=pz-Npz, d2t=ex*ex+ey*ey+ez*ez;
+            if (d2t<bestD2) { bestD2=d2t; bestTi=ti; bNpx=Npx; bNpy=Npy; bNpz=Npz; }
+          }
         }
 
-        // Head sphere blended in
-        { const hx=px-headX,hy=py-headY,hz=pz-headZ;
-          const hd=Math.sqrt(hx*hx+hy*hy+hz*hz);
-          const headsdf=hd-HEAD_R; const hinv=hd>1e-8?1/hd:0;
-          const bh=Math.min(1,Math.max(0, 0.5+0.5*(headsdf-sd)/K_BLEND));
-          const sm=K_BLEND*bh*(1-bh);
-          gnx=gnx*bh+hx*hinv*(1-bh); gny=gny*bh+hy*hinv*(1-bh); gnz=gnz*bh+hz*hinv*(1-bh);
-          jvbx=jvbx*bh+headVX*(1-bh); jvby=jvby*bh+headVY*(1-bh); jvbz=jvbz*bh+headVZ*(1-bh);
-          sd=bh*sd+(1-bh)*headsdf-sm; }
-
-        if (sd < 0) {
-          const gl=Math.sqrt(gnx*gnx+gny*gny+gnz*gnz);
-          if (gl>1e-6) {
-            const inv=1/gl;
-            const nx=gnx*inv, ny=gny*inv, nz=gnz*inv;
-            px-=nx*sd; py-=ny*sd; pz-=nz*sd; // sd<0, pushes outward
-            const rvx=vx-jvbx, rvy=vy-jvby, rvz=vz-jvbz;
-            const vn_rel=rvx*nx+rvy*ny+rvz*nz;
-            if(vn_rel<0){
-              vx=jvbx+(rvx-vn_rel*nx)*BODY_STICK;
-              vy=jvby+(rvy-vn_rel*ny)*BODY_STICK;
-              vz=jvbz+(rvz-vn_rel*nz)*BODY_STICK;
+        if (bestTi >= 0 && bestD2 < 0.0009) { // 3 cm threshold
+          const tAi=meshTri[bestTi*3]*3, tBi=meshTri[bestTi*3+1]*3, tCi=meshTri[bestTi*3+2]*3;
+          const Tax=meshWorld[tAi],Tay=meshWorld[tAi+1],Taz=meshWorld[tAi+2];
+          const Tbx=meshWorld[tBi],Tby=meshWorld[tBi+1],Tbz=meshWorld[tBi+2];
+          const Tcx=meshWorld[tCi],Tcy=meshWorld[tCi+1],Tcz=meshWorld[tCi+2];
+          const e1x=Tbx-Tax,e1y=Tby-Tay,e1z=Tbz-Taz;
+          const e2x=Tcx-Tax,e2y=Tcy-Tay,e2z=Tcz-Taz;
+          const fnx=e1y*e2z-e1z*e2y, fny=e1z*e2x-e1x*e2z, fnz=e1x*e2y-e1y*e2x;
+          const flen=Math.sqrt(fnx*fnx+fny*fny+fnz*fnz);
+          if (flen > 1e-8) {
+            const ex=px-bNpx, ey=py-bNpy, ez=pz-bNpz;
+            const sgn = ex*fnx+ey*fny+ez*fnz; // >0 = outside mesh
+            const fi = 1/flen;
+            let nx=fnx*fi, ny=fny*fi, nz=fnz*fi;
+            if (sgn < 0) { nx=-nx; ny=-ny; nz=-nz; } // inside: flip to push outward
+            const dist = Math.sqrt(bestD2);
+            const sdf = sgn < 0 ? -dist : dist;       // signed distance
+            if (sdf < 0.001) {                         // inside or within 1 mm
+              const push = 0.001 - sdf;
+              px += nx*push; py += ny*push; pz += nz*push;
+              // find nearest joint for velocity
+              let nj=0, njd2=1e9;
+              for (let ji=0;ji<MJ_JOINTS.length;ji++) {
+                const dx=mjPA[ji*3]-bNpx, dy=mjPA[ji*3+1]-bNpy, dz=mjPA[ji*3+2]-bNpz;
+                const jd2=dx*dx+dy*dy+dz*dz;
+                if (jd2<njd2) { njd2=jd2; nj=ji; }
+              }
+              const jvx=mjVA[nj*3], jvy=mjVA[nj*3+1], jvz=mjVA[nj*3+2];
+              const rvx=vx-jvx, rvy=vy-jvy, rvz=vz-jvz;
+              const vnr=rvx*nx+rvy*ny+rvz*nz;
+              if (vnr < 0) {
+                vx=jvx+(rvx-vnr*nx)*BODY_STICK;
+                vy=jvy+(rvy-vnr*ny)*BODY_STICK;
+                vz=jvz+(rvz-vnr*nz)*BODY_STICK;
+              }
+              age[i]=1;
             }
-            age[i]=1;
           }
         }
       }
