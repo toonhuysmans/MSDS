@@ -40,8 +40,8 @@ const GRAVITY     = -4.0;    // m/s²
 const RESTITUTION = 0.82;    // bounciness
 const SPAWN_R     = 2.0;     // rain radius around body centre (m)
 const SPAWN_Y     = 4.5;     // rain spawn height (m above floor)
-const CULL_R2     = 1.6*1.6; // collision zone (XZ distance² from mirror hips)
-const MIRROR_Z    = -2.0;    // mirror body offset: this many metres in front of real hips
+const CULL_R2         = 1.6*1.6; // collision zone (XZ distance² from mirror hips)
+const MIRROR_PLANE_Z  = -1.5;    // world-Z of the mirror surface (halfway between user and image)
 
 // ============================================================
 // Pre-computed respawn table — avoids Math.random/cos in the hot loop
@@ -67,7 +67,7 @@ const col = new Float32Array(N * 3);
 const age      = new Float32Array(N); // bounce flash [0..1], decays to 0
 const restTimer = new Float32Array(N); // seconds until next launch; >0 = parked invisible
 
-let spawnX = 0, spawnY = 2.2, spawnZ = MIRROR_Z; // updated each frame from mirrored head joint
+let spawnX = 0, spawnY = 2.2, spawnZ = 2 * MIRROR_PLANE_Z; // updated each frame from mirrored head joint
 
 // Stagger initial launches so they trickle out rather than burst all at once
 for (let i = 0; i < N; i++) {
@@ -86,7 +86,7 @@ scene.fog = new THREE.FogExp2(0x020208, 0.12);
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 30);
 camera.position.set(0, 1.5, 0.5);   // user viewpoint — looking at mirror body ahead
-camera.lookAt(0, 1.2, MIRROR_Z);
+camera.lookAt(0, 1.2, 2 * MIRROR_PLANE_Z);
 
 const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -101,7 +101,7 @@ const floorRing = new THREE.Mesh(
   new THREE.MeshBasicMaterial({ color: 0x0a0a22, transparent: true, opacity: 0.6, side: THREE.DoubleSide })
 );
 floorRing.rotation.x = -Math.PI / 2;
-floorRing.position.set(0, 0.001, MIRROR_Z);
+floorRing.position.set(0, 0.001, 2 * MIRROR_PLANE_Z);
 scene.add(floorRing);
 
 // ============================================================
@@ -224,8 +224,8 @@ const MAX_CAPS = 16;
 const capBuf = new Float32Array(MAX_CAPS * 8);
 let numCaps = 0;
 
-let headX = 0, headY = 1.7, headZ = MIRROR_Z;
-let mirrorHipsX = 0, mirrorHipsZ = MIRROR_Z; // for particle AABB culling
+let headX = 0, headY = 1.7, headZ = 2 * MIRROR_PLANE_Z;
+let mirrorHipsX = 0, mirrorHipsZ = 2 * MIRROR_PLANE_Z; // for particle AABB culling
 const HEAD_R  = 0.14;
 const HEAD_R2 = HEAD_R * HEAD_R;
 let bodyActive = false;
@@ -243,12 +243,12 @@ function setCap(j, ax, ay, az, bx, by, bz, r) {
 const jp = {}; // real joint position cache
 const mj = {}; // mirrored joint position cache
 
-function mirrorJoint(name, hipsX) {
+function mirrorJoint(name) {
   if (!jp[name]) return;
   if (!mj[name]) mj[name] = { x:0, y:0, z:0 };
-  mj[name].x = 2 * hipsX - jp[name].x; // left-right flip around hips centre
-  mj[name].y = jp[name].y;
-  mj[name].z = jp[name].z + MIRROR_Z;   // offset in front of user
+  mj[name].x = jp[name].x;                          // same X (left hand stays left)
+  mj[name].y = jp[name].y;                          // same Y
+  mj[name].z = 2 * MIRROR_PLANE_Z - jp[name].z;     // Z-reflected through mirror plane
 }
 
 function updateBodyCollision(frame, refSpace) {
@@ -265,8 +265,7 @@ function updateBodyCollision(frame, refSpace) {
   }
 
   // Compute mirrored skeleton
-  const hipsX = jp['hips'] ? jp['hips'].x : 0;
-  for (const name of Object.keys(jp)) mirrorJoint(name, hipsX);
+  for (const name of Object.keys(jp)) mirrorJoint(name);
 
   // Track mirror hips for culling
   if (mj['hips']) { mirrorHipsX = mj['hips'].x; mirrorHipsZ = mj['hips'].z; }
@@ -476,12 +475,12 @@ renderer.setAnimationLoop((ts, frame) => {
 
   if (frame && renderer.xr.isPresenting) {
     const refSpace = renderer.xr.getReferenceSpace();
-    // Fallback before body tracking: spawn above the mirror position offset from viewer head
+    // Fallback before body tracking: spawn at mirror image of viewer head
     const viewerPose = frame.getViewerPose(refSpace);
     if (viewerPose) {
       const p = viewerPose.transform.position;
-      spawnX = p.x; spawnY = p.y + 0.15; spawnZ = p.z + MIRROR_Z;
-      floorRing.position.x = p.x; floorRing.position.z = p.z + MIRROR_Z;
+      spawnX = p.x; spawnY = p.y + 0.15; spawnZ = 2 * MIRROR_PLANE_Z - p.z;
+      floorRing.position.x = p.x; floorRing.position.z = 2 * MIRROR_PLANE_Z - p.z;
     }
     updateBodyCollision(frame, refSpace);
     drawHUD(bodyActive);
