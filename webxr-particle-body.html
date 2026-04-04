@@ -69,7 +69,7 @@ const col = new Float32Array(N * 3);
 const age      = new Float32Array(N); // bounce flash [0..1], decays to 0
 const restTimer = new Float32Array(N); // seconds until next launch; >0 = parked invisible
 
-let spawnX = 0, spawnY = 2.2, spawnZ = 2 * MIRROR_PLANE_Z; // updated each frame from mirrored head joint
+let spawnX = 0, spawnY = 4.5, spawnZ = 2 * MIRROR_PLANE_Z; // updated each frame from mirrored head joint
 
 // Stagger initial launches so they trickle out rather than burst all at once
 for (let i = 0; i < N; i++) {
@@ -286,7 +286,7 @@ function updateBodyCollision(frame, refSpace) {
   if (mj['head']) {
     headX = mj['head'].x; headY = mj['head'].y + 0.04; headZ = mj['head'].z;
     spawnX = mj['head'].x;
-    spawnY = mj['head'].y + 0.35; // just above mirrored head
+    spawnY = mj['head'].y + 2.5;  // well above head so ash spreads before hitting
     spawnZ = mj['head'].z;
     floorRing.position.x = spawnX;
     floorRing.position.z = spawnZ;
@@ -413,7 +413,7 @@ function updateParticles(dt) {
     let ag = age[i];
     if (ag > 0) { ag -= decay; if (ag < 0) ag = 0; age[i] = ag; }
     const speed2 = vx*vx + vy*vy + vz*vz;
-    const heat = Math.min(1, speed2 * 6.0 + ag * 0.8); // fast = hot ember; impact flash
+    const heat = Math.min(1, speed2 * 0.08 + ag * 0.5); // grey at fall speed; glow on hard impact
     col[ix] = heat;  // R: heat level (cool grey → orange-yellow ember in shader)
     // col[iy] preserved — flicker seed set once at launch
     col[iz] = 0;
@@ -494,7 +494,7 @@ renderer.setAnimationLoop((ts, frame) => {
     const viewerPose = frame.getViewerPose(refSpace);
     if (viewerPose) {
       const p = viewerPose.transform.position;
-      spawnX = p.x; spawnY = p.y + 0.15; spawnZ = 2 * MIRROR_PLANE_Z - p.z;
+      spawnX = p.x; spawnY = p.y + 2.5; spawnZ = 2 * MIRROR_PLANE_Z - p.z;
       floorRing.position.x = p.x; floorRing.position.z = 2 * MIRROR_PLANE_Z - p.z;
     }
     updateBodyCollision(frame, refSpace);
