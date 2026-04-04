@@ -36,8 +36,10 @@ import * as THREE from 'three';
 // Config — tune N down if frame-rate drops
 // ============================================================
 const N           = 200_000; // particle count
-const GRAVITY     = -4.0;    // m/s²
-const RESTITUTION = 0.82;    // bounciness
+const GRAVITY     = -1.2;    // m/s² — gentle ash drift
+const RESTITUTION = 0.04;    // nearly no bounce — ash deadens on impact
+const BODY_STICK  = 0.08;    // tangential velocity retained on body contact
+const FLOOR_STICK = 0.15;    // horizontal velocity retained on floor contact
 const SPAWN_R     = 2.0;     // rain radius around body centre (m)
 const SPAWN_Y     = 4.5;     // rain spawn height (m above floor)
 const CULL_R2         = 1.6*1.6; // collision zone (XZ distance² from mirror hips)
@@ -51,7 +53,7 @@ const RD = new Float32Array(RBUF * 3); // vx, vy, vz — random spherical kick
 for (let i = 0; i < RBUF; i++) {
   const theta = Math.random() * 6.28318;
   const phi   = Math.acos(2 * Math.random() - 1); // uniform sphere
-  const speed = 0.15 + Math.random() * 0.35;
+  const speed = 0.04 + Math.random() * 0.12; // gentle ash dispersal
   RD[i*3+0] = Math.sin(phi) * Math.cos(theta) * speed;
   RD[i*3+1] = Math.sin(phi) * Math.sin(theta) * speed;
   RD[i*3+2] = Math.cos(phi) * speed;
@@ -135,20 +137,22 @@ const mat = new THREE.ShaderMaterial({
       float r = length(gl_PointCoord - vec2(0.5));
       if (r > 0.5) discard;
 
-      // Soft inner glow disc
-      float glow = pow(1.0 - smoothstep(0.0, 0.5, r), 1.6);
+      // Soft disc, slightly harder edge for ash flakes
+      float glow = pow(1.0 - smoothstep(0.0, 0.48, r), 1.2);
 
-      // Slow eerie breathing pulse, slightly different per particle (use blue channel as seed)
-      float pulse = 0.55 + 0.45 * sin(time * 0.65 + vColor.b * 11.0);
+      // heat encodes in R channel (grey ash → orange-red ember when fast)
+      float heat = vColor.r;
+      // cool ash: grey; warm: orange; hot: yellow-white
+      vec3 cool = vec3(0.28, 0.24, 0.20);
+      vec3 warm = vec3(1.00, 0.38, 0.02);
+      vec3 hot  = vec3(1.00, 0.90, 0.55);
+      vec3 ashCol = mix(cool, warm, heat);
+      ashCol      = mix(ashCol, hot, heat * heat);
 
-      // Spectral shift — drain red, boost sickly green-cyan
-      vec3 eerie = vec3(
-        vColor.r * 0.35,
-        vColor.g * 0.85 + vColor.b * 0.25,
-        vColor.b * 1.3 + 0.05
-      );
+      // Subtle flicker seeded per-particle via green channel
+      float flicker = 0.88 + 0.12 * sin(time * 6.0 + vColor.g * 83.0);
 
-      gl_FragColor = vec4(eerie * glow * pulse, glow);
+      gl_FragColor = vec4(ashCol * glow * flicker, glow * (0.35 + heat * 0.65));
     }
   `,
   transparent: true,
@@ -314,6 +318,7 @@ function updateParticles(dt) {
       const ri = (rdHead++ & (RBUF-1)) * 3;
       pos[ix] = cx; pos[iy] = cy; pos[iz] = cz;
       vel[ix] = RD[ri]; vel[iy] = RD[ri+1]; vel[iz] = RD[ri+2];
+      col[iy] = Math.random(); // stable per-particle flicker seed (G channel)
       age[i] = 0;
       continue;
     }
@@ -326,20 +331,19 @@ function updateParticles(dt) {
     py += vy * dt;
     pz += vz * dt;
 
-    // Floor bounce
+    // Floor contact — ash deadens immediately
     if (py < 0) {
       py = 0;
       if (vy < 0) {
-        vy = -vy * RESTITUTION;
-        vx *= 0.85; vz *= 0.85; // friction
-        age[i] = 0.5;
+        vy = -vy * RESTITUTION;        // tiny upward bounce
+        vx *= FLOOR_STICK; vz *= FLOOR_STICK; // strong horizontal friction
       }
-      // Nearly at rest — park invisible and start rest timer
-      if (vy < 0.15) {
+      // Park as soon as barely moving — ash settles fast
+      if (vy < 0.08) {
         if (restTimer[i] <= 0) restTimer[i] = 1.5 + Math.random() * 4.5;
         px = 0; py = 0; pz = 0;
         vx = 0; vy = 0; vz = 0;
-        col[ix] = 0; col[iy] = 0; col[iz] = 0; // invisible (additive black)
+        col[ix] = 0; col[iy] = 0; col[iz] = 0;
         pos[ix]=px; pos[iy]=py; pos[iz]=pz;
         vel[ix]=0; vel[iy]=0; vel[iz]=0;
         continue;
@@ -369,8 +373,14 @@ function updateParticles(dt) {
             const inv = 1/Math.sqrt(d2);
             const nx=ex*inv, ny=ey*inv, nz=ez*inv;
             px=qx+nx*r; py=qy+ny*r; pz=qz+nz*r;
+            // Ash sticks: kill normal velocity, heavily damp tangential
             const vn=vx*nx+vy*ny+vz*nz;
-            if (vn < 0) { const f=1+RESTITUTION; vx-=f*vn*nx; vy-=f*vn*ny; vz-=f*vn*nz; }
+            if (vn < 0) {
+              // Remove normal component entirely (no bounce), retain tiny tangential slide
+              vx = (vx - vn*nx) * BODY_STICK;
+              vy = (vy - vn*ny) * BODY_STICK;
+              vz = (vz - vn*nz) * BODY_STICK;
+            }
             age[i] = 1;
             hit = true;
           }
@@ -385,7 +395,11 @@ function updateParticles(dt) {
             const nx=hx*inv, ny=hy*inv, nz=hz*inv;
             px=headX+nx*HEAD_R; py=headY+ny*HEAD_R; pz=headZ+nz*HEAD_R;
             const vn=vx*nx+vy*ny+vz*nz;
-            if (vn < 0) { const f=1+RESTITUTION; vx-=f*vn*nx; vy-=f*vn*ny; vz-=f*vn*nz; }
+            if (vn < 0) {
+              vx = (vx - vn*nx) * BODY_STICK;
+              vy = (vy - vn*ny) * BODY_STICK;
+              vz = (vz - vn*nz) * BODY_STICK;
+            }
             age[i] = 1;
           }
         }
@@ -395,13 +409,14 @@ function updateParticles(dt) {
     pos[ix]=px; pos[iy]=py; pos[iz]=pz;
     vel[ix]=vx; vel[iy]=vy; vel[iz]=vz;
 
-    // Color: speed-tinted blue-white + warm bounce flash
+    // Color: R = heat (grey→ember glow), G = per-particle flicker seed (static-ish)
     let ag = age[i];
     if (ag > 0) { ag -= decay; if (ag < 0) ag = 0; age[i] = ag; }
-    const sp = Math.min(1, (vx*vx + vy*vy + vz*vz) * 0.03);
-    col[ix] = sp*0.3  + ag*0.9;         // R: dim → warm gold on bounce
-    col[iy] = sp*0.45 + ag*0.6  + 0.04; // G
-    col[iz] = sp*0.7  + ag*0.1  + 0.1;  // B: always slightly blue
+    const speed2 = vx*vx + vy*vy + vz*vz;
+    const heat = Math.min(1, speed2 * 6.0 + ag * 0.8); // fast = hot ember; impact flash
+    col[ix] = heat;  // R: heat level (cool grey → orange-yellow ember in shader)
+    // col[iy] preserved — flicker seed set once at launch
+    col[iz] = 0;
   }
 
   posAttr.needsUpdate = true;
