@@ -67,8 +67,18 @@ let rdHead = 0;
 const pos = new Float32Array(N * 3);
 const vel = new Float32Array(N * 3);
 const col = new Float32Array(N * 3);
-const age      = new Float32Array(N); // bounce flash [0..1], decays to 0
+const age       = new Float32Array(N); // bounce flash [0..1], decays to 0
 const restTimer = new Float32Array(N); // seconds until next launch; >0 = parked invisible
+
+// Per-particle intrinsic properties — randomised once, never change
+const propSize = new Float32Array(N); // point size multiplier
+const propMass = new Float32Array(N); // affects gravity & drag (heavy falls fast; light floats)
+const propGlow = new Float32Array(N); // heat sensitivity multiplier
+for (let i = 0; i < N; i++) {
+  propSize[i] = 0.3 + Math.random() * Math.random() * 3.0; // skewed: mostly small, rare large
+  propMass[i] = 0.4 + Math.random() * 1.6;                  // 0.4 (feather) – 2.0 (heavy)
+  propGlow[i] = 0.3 + Math.random() * 2.5;                  // 0.3 (barely glows) – 2.8 (hair-trigger)
+}
 
 let spawnX = 0, spawnY = 4.5, spawnZ = 2 * MIRROR_PLANE_Z; // updated each frame from mirrored head joint
 
@@ -76,8 +86,8 @@ let spawnX = 0, spawnY = 4.5, spawnZ = 2 * MIRROR_PLANE_Z; // updated each frame
 for (let i = 0; i < N; i++) {
   pos[i*3] = spawnX; pos[i*3+1] = spawnY; pos[i*3+2] = spawnZ;
   vel[i*3] = 0; vel[i*3+1] = 0; vel[i*3+2] = 0;
-  col[i*3] = 0; col[i*3+1] = 0; col[i*3+2] = 0;          // invisible until launched
-  restTimer[i] = Math.random() * 12.0;                      // staggered 0-12s delay
+  col[i*3] = 0; col[i*3+1] = 0; col[i*3+2] = 0;
+  restTimer[i] = Math.random() * 12.0;
 }
 
 // ============================================================
@@ -111,35 +121,43 @@ scene.add(floorRing);
 // Particle geometry
 // ============================================================
 const geom = new THREE.BufferGeometry();
-const posAttr = new THREE.BufferAttribute(pos, 3);
-const colAttr = new THREE.BufferAttribute(col, 3);
+const posAttr  = new THREE.BufferAttribute(pos, 3);
+const colAttr  = new THREE.BufferAttribute(col, 3);
+const sizeAttr = new THREE.BufferAttribute(propSize, 1); // static — upload once
 posAttr.setUsage(THREE.DynamicDrawUsage);
 colAttr.setUsage(THREE.DynamicDrawUsage);
 geom.setAttribute('position', posAttr);
 geom.setAttribute('color', colAttr);
+geom.setAttribute('aSize', sizeAttr);
 
 const mat = new THREE.ShaderMaterial({
-  uniforms: { pointSize: { value: 7.0 }, time: { value: 0.0 } },
+  uniforms: { pointSize: { value: 6.0 }, time: { value: 0.0 } },
   vertexShader: `
-    attribute vec3 color;
-    varying vec3 vColor;
+    attribute vec3  color;
+    attribute float aSize;
+    varying vec3  vColor;
+    varying float vSize; // pass to frag for edge softness scaling
     uniform float pointSize;
     void main() {
       vColor = color;
+      vSize  = aSize;
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      gl_PointSize = pointSize / -mv.z;
+      gl_PointSize = pointSize * aSize / -mv.z;
       gl_Position = projectionMatrix * mv;
     }
   `,
   fragmentShader: `
     uniform float time;
-    varying vec3 vColor;
+    varying vec3  vColor;
+    varying float vSize;
     void main() {
       float r = length(gl_PointCoord - vec2(0.5));
       if (r > 0.5) discard;
 
-      // Soft disc, slightly harder edge for ash flakes
-      float glow = pow(1.0 - smoothstep(0.0, 0.48, r), 1.2);
+      // Larger particles get a crisper edge; tiny ones stay soft/diffuse
+      float edge  = mix(0.50, 0.30, clamp((vSize - 0.3) / 2.5, 0.0, 1.0));
+      float power = mix(1.0,  1.8,  clamp((vSize - 0.3) / 2.5, 0.0, 1.0));
+      float glow  = pow(1.0 - smoothstep(0.0, edge, r), power);
 
       // heat encodes in R channel (grey ash → orange-red ember when fast)
       float heat = vColor.r;
@@ -327,9 +345,9 @@ function updateBodyCollision(frame, refSpace, dt) {
 // Particle physics — tight loop over typed arrays
 // ============================================================
 function updateParticles(dt) {
-  const dtG   = GRAVITY * dt;
-  const dm    = 1 - AIR_DRAG * dt; // linear drag multiplier (~0.971 at 60 fps)
-  const decay = dt * 5.0;
+  const dtG    = GRAVITY * dt;
+  const dtAD   = AIR_DRAG * dt;    // per-particle drag = dtAD / mass
+  const decay  = dt * 5.0;
   const cx = spawnX, cy = spawnY, cz = spawnZ;
   const chx = mirrorHipsX, chz = mirrorHipsZ; // cull centre at mirror hips
   const nc = numCaps;
@@ -354,9 +372,11 @@ function updateParticles(dt) {
     let px = pos[ix], py = pos[iy], pz = pos[iz];
     let vx = vel[ix], vy = vel[iy], vz = vel[iz];
 
-    vx *= dm;
-    vy  = vy * dm + dtG; // drag + gravity; limits fall speed to ~0.67 m/s
-    vz *= dm;
+    const mass = propMass[i];
+    const dm_i = 1 - dtAD / mass;  // light particles drag more; heavy particles less
+    vx *= dm_i;
+    vy  = vy * dm_i + dtG * mass;  // heavier → stronger gravity, slower drag → faster fall
+    vz *= dm_i;
     px += vx * dt;
     py += vy * dt;
     pz += vz * dt;
@@ -446,7 +466,7 @@ function updateParticles(dt) {
     let ag = age[i];
     if (ag > 0) { ag -= decay; if (ag < 0) ag = 0; age[i] = ag; }
     const speed2 = vx*vx + vy*vy + vz*vz;
-    const heat = Math.min(1, speed2 * 0.08 + ag * 0.5); // grey at fall speed; glow on hard impact
+    const heat = Math.min(1, speed2 * 0.08 * propGlow[i] + ag * 0.5); // per-particle glow sensitivity
     col[ix] = heat;  // R: heat level (cool grey → orange-yellow ember in shader)
     // col[iy] preserved — flicker seed set once at launch
     col[iz] = 0;
