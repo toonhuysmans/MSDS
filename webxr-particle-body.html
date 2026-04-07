@@ -252,13 +252,11 @@ const mat = new THREE.ShaderMaterial({
       uv.y = (hmCenter.y + hmHalf - pos.z) / (2.0 * hmHalf);
       if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
         float surfY = texture2D(heightMap, uv).r * hmYMax;
-        // Snap particles that are within 0.35 m below the surface up to it.
-        // - Particles still above (falling) are unaffected (diff < 0).
-        // - Particles more than 35 cm below escape the snap — so a fast
-        //   arm swing (>35 cm/frame ~2.5 m/s) leaves particles behind,
-        //   giving natural shake-off behaviour.
+        // Snap particles within 5 cm below the surface up to it.
+        // Particles above (falling) are unaffected (diff < 0).
+        // Particles more than 5 cm below have escaped and fall freely.
         float diff = surfY - pos.y;
-        if (surfY > 0.05 && diff > 0.0 && diff < 0.35) pos.y = surfY;
+        if (surfY > 0.05 && diff > 0.0 && diff < 0.05) pos.y = surfY;
       }
       vec4 mv = modelViewMatrix * vec4(pos, 1.0);
       gl_PointSize = pointSize * aSize / -mv.z;
@@ -371,6 +369,7 @@ function renderDepthMap() {
 }
 
 let mirrorHipsX = 0, mirrorHipsZ = 2 * MIRROR_PLANE_Z;
+let bodyDeltaX = 0, bodyDeltaZ = 0; // per-frame horizontal body movement
 let bodyActive = false;
 
 // Joint position cache — used only for hips tracking and spawn point
@@ -462,6 +461,8 @@ function updateBodyCollision(frame, refSpace, dt) {
   const headNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Head);
   if (hipsNode) {
     hipsNode.getWorldPosition(_tv);
+    bodyDeltaX = _tv.x - mirrorHipsX;
+    bodyDeltaZ = _tv.z - mirrorHipsZ;
     mirrorHipsX = _tv.x; mirrorHipsZ = _tv.z;
     mat.uniforms.hmCenter.value.set(mirrorHipsX, mirrorHipsZ);
   }
@@ -503,6 +504,16 @@ function updateParticles(dt) {
 
     let px = pos[ix], py = pos[iy], pz = pos[iz];
     let vx = vel[ix], vy = vel[iy], vz = vel[iz];
+
+    // Translate particles in the body zone with the body's horizontal movement
+    // so stuck particles follow the body laterally rather than floating in place.
+    if (bodyActive && py > 0.05 && py < 2.8) {
+      const ddx = px - mirrorHipsX, ddz = pz - mirrorHipsZ;
+      if (ddx*ddx + ddz*ddz < 1.4*1.4) {
+        px += bodyDeltaX;
+        pz += bodyDeltaZ;
+      }
+    }
 
     const mass = propMass[i];
     const dm_i = 1 - dtAD / mass;  // light particles drag more; heavy particles less
