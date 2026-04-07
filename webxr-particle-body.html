@@ -372,8 +372,24 @@ let mirrorHipsX = 0, mirrorHipsZ = 2 * MIRROR_PLANE_Z;
 let bodyDeltaX = 0, bodyDeltaZ = 0; // per-frame horizontal body movement
 let bodyActive = false;
 
-// Joint position cache — used only for hips tracking and spawn point
+// Joint world positions — used for CPU surface pinning
 const mj = {};
+
+// Spheres used only for top-surface CPU pinning (no push-out).
+// The GPU depth map refines the visual position to the actual mesh.
+const SURFACE_SPHERES = [
+  { j: VRMHumanBoneName.Head,         r: 0.13 },
+  { j: VRMHumanBoneName.UpperChest,   r: 0.20 },
+  { j: VRMHumanBoneName.Hips,         r: 0.18 },
+  { j: VRMHumanBoneName.LeftUpperArm, r: 0.09 },
+  { j: VRMHumanBoneName.RightUpperArm,r: 0.09 },
+  { j: VRMHumanBoneName.LeftLowerArm, r: 0.07 },
+  { j: VRMHumanBoneName.RightLowerArm,r: 0.07 },
+  { j: VRMHumanBoneName.LeftUpperLeg, r: 0.12 },
+  { j: VRMHumanBoneName.RightUpperLeg,r: 0.12 },
+  { j: VRMHumanBoneName.LeftLowerLeg, r: 0.09 },
+  { j: VRMHumanBoneName.RightLowerLeg,r: 0.09 },
+];
 
 // Virtual T-pose calibration — captured automatically on first valid body frame
 const calibRest = {};
@@ -456,19 +472,28 @@ function updateBodyCollision(frame, refSpace, dt) {
   vrm.update(dt);
   vrm.scene.updateMatrixWorld(true);
 
-  // Read hips + head world positions for depth cam centre and spawn point
-  const hipsNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Hips);
-  const headNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Head);
-  if (hipsNode) {
-    hipsNode.getWorldPosition(_tv);
-    bodyDeltaX = _tv.x - mirrorHipsX;
-    bodyDeltaZ = _tv.z - mirrorHipsZ;
-    mirrorHipsX = _tv.x; mirrorHipsZ = _tv.z;
+  // Read all surface-sphere bone positions into mj[]
+  for (const sph of SURFACE_SPHERES) {
+    const node = vrm.humanoid.getNormalizedBoneNode(sph.j);
+    if (!node) continue;
+    node.getWorldPosition(_tv);
+    if (!mj[sph.j]) mj[sph.j] = { x: 0, y: 0, z: 0 };
+    mj[sph.j].x = _tv.x; mj[sph.j].y = _tv.y; mj[sph.j].z = _tv.z;
+  }
+
+  // Hips: depth cam centre + horizontal delta
+  const hipsPos = mj[VRMHumanBoneName.Hips];
+  if (hipsPos) {
+    bodyDeltaX = hipsPos.x - mirrorHipsX;
+    bodyDeltaZ = hipsPos.z - mirrorHipsZ;
+    mirrorHipsX = hipsPos.x; mirrorHipsZ = hipsPos.z;
     mat.uniforms.hmCenter.value.set(mirrorHipsX, mirrorHipsZ);
   }
-  if (headNode) {
-    headNode.getWorldPosition(_tv);
-    spawnX = _tv.x; spawnY = _tv.y + 2.5; spawnZ = _tv.z;
+
+  // Head: spawn point
+  const headPos = mj[VRMHumanBoneName.Head];
+  if (headPos) {
+    spawnX = headPos.x; spawnY = headPos.y + 2.5; spawnZ = headPos.z;
     floorRing.position.x = spawnX; floorRing.position.z = spawnZ;
   }
 
@@ -523,6 +548,28 @@ function updateParticles(dt) {
     px += vx * dt;
     py += vy * dt;
     pz += vz * dt;
+
+    // CPU body surface pinning — top-of-sphere contact stops the particle falling.
+    // The GPU depth map then refines its visual Y to the actual mesh surface.
+    // Shake-off: when a sphere moves away, cpuSurfY drops and the particle is released.
+    if (bodyActive) {
+      let cpuSurfY = 0;
+      for (let si = 0; si < SURFACE_SPHERES.length; si++) {
+        const sph = SURFACE_SPHERES[si];
+        const jp = mj[sph.j]; if (!jp) continue;
+        const dx = px - jp.x, dz = pz - jp.z;
+        const d2 = dx*dx + dz*dz, r = sph.r;
+        if (d2 < r*r) {
+          const top = jp.y + Math.sqrt(r*r - d2);
+          if (top > cpuSurfY) cpuSurfY = top;
+        }
+      }
+      if (cpuSurfY > 0.05 && py < cpuSurfY) {
+        py = cpuSurfY;
+        if (vy < 0) { vy = 0; vx *= FLOOR_STICK; vz *= FLOOR_STICK; }
+        age[i] = 0.3; // slight heat flash on impact
+      }
+    }
 
     // Floor contact — ash deadens immediately
     if (py < 0) {
