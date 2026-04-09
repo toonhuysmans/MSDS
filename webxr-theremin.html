@@ -74,27 +74,20 @@ function initAudio() {
   lfoRateWobbleGain.connect(lfo.frequency);
   lfoRateWobble.start();
 
-  // Sawtooth oscillators — richer harmonic content than sine
+  // Single sawtooth oscillator
   oscillator = audioCtx.createOscillator();
   oscillator.type = 'sawtooth';
   oscillator.frequency.value = 220;
   lfoGain.connect(oscillator.frequency);
 
-  const osc2 = audioCtx.createOscillator();
-  osc2.type = 'sawtooth';
-  osc2.frequency.value = 220;
-  osc2.detune.value = 7;
-  lfoGain.connect(osc2.frequency);
-
   gainNode = audioCtx.createGain();
   gainNode.gain.value = 0;
 
   // Lowpass filter — cutoff rises with volume: quiet = dark/muted, loud = bright
-  // This replicates the natural harmonic characteristic of a real theremin
   filterNode = audioCtx.createBiquadFilter();
   filterNode.type = 'lowpass';
-  filterNode.frequency.value = 300; // starts dark/silent
-  filterNode.Q.value = 1.2;         // slight resonance warmth at cutoff
+  filterNode.frequency.value = 300;
+  filterNode.Q.value = 1.2;
 
   const dryGain = audioCtx.createGain();
   dryGain.gain.value = 0.7;
@@ -102,7 +95,6 @@ function initAudio() {
   reverbGain.gain.value = 0.35;
 
   oscillator.connect(gainNode);
-  osc2.connect(gainNode);
   gainNode.connect(filterNode);
   filterNode.connect(dryGain);
   filterNode.connect(convolver);
@@ -111,7 +103,6 @@ function initAudio() {
   reverbGain.connect(audioCtx.destination);
 
   oscillator.start();
-  osc2.start();
 
 }
 
@@ -121,8 +112,8 @@ function initAudio() {
 const PITCH_X_ANTENNA = 0.36; // x position of pitch rod
 const PITCH_X_FAR  = 0.08;   // right hand far left  → lowest pitch
 const PITCH_X_NEAR = 0.34;   // right hand near rod  → highest pitch
-const FREQ_MIN = 110;
-const FREQ_MAX = 880;
+const FREQ_MIN = 110;  // A2
+const FREQ_MAX = 440;  // A4 — two octaves
 
 // Volume: left hand Y → gain  (real theremin: hand height above volume loop)
 // ~20cm vertical sweep covers full range.
